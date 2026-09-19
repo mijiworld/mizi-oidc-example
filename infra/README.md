@@ -45,6 +45,8 @@ bash scripts/deploy.sh
 스크립트는 깨끗한 Git 커밋을 확인한 뒤 타입 검사·테스트·빌드, SHA별 ZIP 업로드,
 CloudFormation 배포, `/health`의 배포 SHA 확인을 수행합니다. 같은 명령으로 이후
 커밋을 배포할 수 있습니다. GitHub CI도 동일한 타입 검사·테스트·빌드를 수행합니다.
+첫 HTTPS 도메인 전파를 기다리도록 health 확인은 최대 3분간 짧게 재시도합니다.
+재시도 중에도 TLS 인증서 검증과 40자리 배포 SHA의 정확한 일치는 필수입니다.
 이 예제는 GitHub에 장기 AWS 키를 저장하거나 자동 배포 권한을 만들지 않습니다.
 
 `CLIENT_ID`는 배포 호스트의 `/client.json`으로 설정됩니다. 이 CIMD 문서와

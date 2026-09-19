@@ -41,9 +41,58 @@ aws cloudformation deploy \
     ArtifactKey="$artifact_key" ReleaseSha="$release_sha"
 
 DEMO_URL="https://${DOMAIN_NAME}" EXPECTED_RELEASE="$release_sha" node --input-type=module <<'NODE'
-const response = await fetch(process.env.DEMO_URL + '/health', { signal: AbortSignal.timeout(15000) });
-if (!response.ok) throw new Error(`Health check failed: ${response.status}`);
-const body = await response.json();
-if (body.releaseSha !== process.env.EXPECTED_RELEASE) throw new Error('Release SHA mismatch');
-console.log(`Verified ${process.env.DEMO_URL} at ${body.releaseSha}`);
+const budgetMs = 180000;
+const expectedRelease = process.env.EXPECTED_RELEASE;
+
+async function probe(url, timeoutMs) {
+  let response;
+  try {
+    // Keep normal certificate validation; a newly created custom domain may need
+    // time to propagate. Never follow redirects to another host or downgrade TLS.
+    response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
+  } catch {
+    return 'HTTPS request failed';
+  }
+  if (response.status !== 200) {
+    await response.body?.cancel().catch(() => {});
+    return `HTTP ${response.status}`;
+  }
+  let body;
+  try { body = await response.json(); } catch { return 'invalid health response'; }
+  if (!body || typeof body.releaseSha !== 'string' || !/^[a-f0-9]{40}$/.test(body.releaseSha)) {
+    return 'invalid release SHA';
+  }
+  return body.releaseSha === expectedRelease ? null : 'release SHA mismatch';
+}
+
+async function verifyRelease() {
+  const base = new URL(process.env.DEMO_URL);
+  if (base.protocol !== 'https:' || base.username || base.password || base.pathname !== '/' ||
+      base.search || base.hash || !/^[a-f0-9]{40}$/.test(expectedRelease ?? '')) {
+    throw new Error('Invalid probe configuration.');
+  }
+  const deadline = performance.now() + budgetMs;
+  let lastFailure = 'HTTPS request failed';
+  while (performance.now() < deadline) {
+    const remainingMs = Math.max(1, Math.floor(deadline - performance.now()));
+    const failure = await probe(new URL('/health', base), Math.min(15000, remainingMs));
+    if (failure === null) {
+      console.log(`Verified ${base.origin} at ${expectedRelease}`);
+      return;
+    }
+    lastFailure = failure;
+    const delayMs = Math.min(5000, Math.max(0, deadline - performance.now()));
+    if (delayMs <= 0) break;
+    console.warn(`Health verification pending (${lastFailure}); retrying.`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  console.error(`Health verification failed within the 3-minute retry limit (${lastFailure}).`);
+  process.exitCode = 1;
+}
+
+// Never print fetch/TLS exceptions, response bodies, or their causes.
+verifyRelease().catch(() => {
+  console.error('Health verification failed: invalid configuration or unexpected probe failure.');
+  process.exitCode = 1;
+});
 NODE
