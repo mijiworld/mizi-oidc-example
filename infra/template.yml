@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: MiZi OIDC relying-party demo on Lambda, HTTP API, and DynamoDB.
+Parameters:
+  DomainName:
+    Type: String
+    AllowedPattern: '[a-z0-9][a-z0-9.-]+'
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+  CertificateArn:
+    Type: String
+    Description: An issued ACM certificate in this stack region covering DomainName.
+  ArtifactBucket:
+    Type: String
+  ArtifactKey:
+    Type: String
+  ReleaseSha:
+    Type: String
+    AllowedPattern: '[a-f0-9]{40}'
+  OidcIssuer:
+    Type: String
+    Default: https://mcp-auth-api.cccv.ai
+    AllowedPattern: 'https://[^/?#]+(/[a-zA-Z0-9._~-]+)*'
+Resources:
+  Sessions:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+  FunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-app'
+      RetentionInDays: 7
+  AccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/${AWS::StackName}/http'
+      RetentionInDays: 7
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: OwnSessionsAndLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt Sessions.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt FunctionLogs.Arn
+  App:
+    Type: AWS::Lambda::Function
+    DependsOn: FunctionLogs
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-app'
+      Description: A separate OIDC relying party; never an identity-provider replacement.
+      Role: !GetAtt FunctionRole.Arn
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      Handler: lambda.handler
+      MemorySize: 256
+      Timeout: 20
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+      Environment:
+        Variables:
+          NODE_ENV: production
+          BASE_URL: !Sub 'https://${DomainName}'
+          OIDC_ISSUER: !Ref OidcIssuer
+          CLIENT_ID: !Sub 'https://${DomainName}/client.json'
+          SESSION_TABLE: !Ref Sessions
+          RELEASE_SHA: !Ref ReleaseSha
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Ref AWS::StackName
+      ProtocolType: HTTP
+      DisableExecuteApiEndpoint: true
+  Integration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt App.Arn
+      PayloadFormatVersion: '2.0'
+      TimeoutInMillis: 22000
+  Route:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: '$default'
+      Target: !Join ['/', ['integrations', !Ref Integration]]
+  InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref App
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*'
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    DependsOn: Route
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 5
+        ThrottlingBurstLimit: 10
+      AccessLogSettings:
+        DestinationArn: !GetAtt AccessLogs.Arn
+        # Never log URL/query strings, authorization headers, cookies, or IPs.
+        Format: '{"requestId":"$context.requestId","method":"$context.httpMethod","route":"$context.routeKey","status":"$context.status","latency":"$context.responseLatency"}'
+  Domain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Ref DomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref CertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+  Mapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref Domain
+      Stage: !Ref Stage
+  Dns:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt Domain.RegionalDomainName
+        HostedZoneId: !GetAtt Domain.RegionalHostedZoneId
+        EvaluateTargetHealth: false
+Outputs:
+  DemoUrl:
+    Value: !Sub 'https://${DomainName}'
+  CallbackUrl:
+    Value: !Sub 'https://${DomainName}/auth/callback'
+  ClientMetadataUrl:
+    Value: !Sub 'https://${DomainName}/client.json'
+  FunctionName:
+    Value: !Ref App
+  SessionTable:
+    Value: !Ref Sessions
+  ReleaseSha:
+    Value: !Ref ReleaseSha

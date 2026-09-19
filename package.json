@@ -1,0 +1,35 @@
+{
+  "name": "mizi-oidc-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A server-side MiZi OpenID Connect login example",
+  "engines": {
+    "node": ">=20.20.0"
+  },
+  "packageManager": "pnpm@9.4.0",
+  "scripts": {
+    "dev": "tsx --env-file=.env src/server.ts",
+    "start": "node --env-file=.env dist/server.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1136.0",
+    "@aws-sdk/lib-dynamodb": "^3.1136.0",
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.13.8",
+    "jose": "^6.2.12",
+    "openid-client": "^6.8.8",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  },
+  "license": "MIT"
+}
