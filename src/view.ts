@@ -66,8 +66,8 @@ function login(model: HomeViewModel): string {
 }
 
 function connectProfile(): string {
-  return `<form class="login-form" action="/connect-profile" method="post"><button class="button primary" type="submit">미지 프로필 연결하기 <span aria-hidden="true">→</span></button></form>
-    <p class="fine">미지에서 프로필 읽기 권한을 추가로 허용합니다. 미지의 정보를 수정하지 않습니다.</p>`;
+  return `<form class="login-form" action="/connect-profile" method="post"><button class="button primary" type="submit">내 미지 정보 가져오기 <span aria-hidden="true">→</span></button></form>
+    <p class="fine">다음 미지 화면에서 정보 제공을 허용해 주세요. 이 단계를 건너뛰어도 로그인은 완료된 상태예요.</p>`;
 }
 
 const API_ERROR_MESSAGES: Record<
@@ -97,7 +97,7 @@ function memberPanel(
         ? "invalid_response"
         : undefined;
   return `<section class="card stage" aria-labelledby="member-heading">
-    <div class="stage-heading"><span class="step-number" aria-hidden="true">2</span><h2 id="member-heading">미지 회원 정보 가져오기</h2></div>
+    <div class="stage-heading"><span class="step-number" aria-hidden="true">2</span><h2 id="member-heading">내 미지 정보 가져오기</h2>${member ? "" : '<span class="tag">선택</span>'}</div>
     ${
       member
         ? `<p class="subtle">아래는 표시된 조회 시점의 정보입니다.</p>
@@ -109,7 +109,7 @@ function memberPanel(
       </dl>
       <form class="refresh-form" action="/connect-profile" method="post"><button class="button secondary" type="submit">프로필 다시 가져오기</button></form>
       <p class="fine">새 인증 요청으로 다시 연결하면 현재 프로젝트 선택은 초기화됩니다.</p>`
-        : `<p class="subtle">닉네임과 GitHub 연결 여부를 미지에서 가져오려면 추가 동의가 필요해요.</p>
+        : `<p class="subtle">프로젝트 보드도 체험해 보세요. 아래 버튼에서 정보 제공에 동의하면 미지의 닉네임과 GitHub 연결 여부를 가져옵니다.</p>
         ${reason ? `<p class="inline-error" role="alert">${escape(API_ERROR_MESSAGES[reason])}</p>` : ""}
         ${connectProfile()}`
     }
@@ -123,7 +123,7 @@ function projectPanel(model: HomeViewModel, ready: boolean): string {
     : undefined;
   return `<section id="project-board" class="card stage" aria-labelledby="project-heading">
     <div class="stage-heading"><span class="step-number" aria-hidden="true">3</span><h2 id="project-heading">내 프로젝트 시작 보드</h2></div>
-    <p class="subtle">${ready ? "만들고 싶은 서비스를 골라 보세요. 이 데모가 준비한 시작 목록을 내 보드에 담습니다." : "회원 API 연결을 마치면 만들고 싶은 서비스를 고를 수 있어요."}</p>
+    <p class="subtle">${ready ? "만들고 싶은 서비스를 골라 보세요. 이 데모가 준비한 시작 목록을 내 보드에 담습니다." : "위에서 내 미지 정보를 가져오면, 여기에서 만들고 싶은 서비스를 골라 나만의 보드를 체험할 수 있어요."}</p>
     ${model.serviceError ? `<p class="inline-error" role="alert">${escape(model.serviceError)}</p>` : ""}
     ${
       ready
@@ -151,15 +151,16 @@ function success(
       : undefined;
   return `<section class="intro">
     <p class="eyebrow">MiZi login · Your service</p>
-    <h1>내 프로젝트,<br>여기서 시작해요.</h1>
-    <p class="lead">로그인한 내 계정으로, 허용한 정보를 읽고 이 데모 안에서 작은 서비스를 이용해 보세요.</p>
+    <h1>${member ? "내 프로젝트,<br>여기서 시작해요." : "로그인이 완료됐어요."}</h1>
+    <p class="lead">${member ? "미지로 로그인하고 내 정보도 가져왔어요. 이제 만들고 싶은 서비스를 골라 보세요." : "미지 계정으로 이 데모에 로그인했어요. 원하면 다음 단계에서 내 정보를 가져와 프로젝트 보드도 체험할 수 있어요."}</p>
   </section>
   ${model.error ? `<section class="error" role="alert"><h2>이번 연결을 완료하지 못했어요</h2><p>${escape(model.error)}</p><p>기존 로그인은 유지됩니다.${member ? " 아래 회원 정보는 이전 조회 결과입니다." : " 프로필 연결을 다시 시도해 주세요."}</p></section>` : ""}
   <div class="workspace">
     <section class="card stage" aria-labelledby="profile-heading">
-      <div class="stage-heading"><span class="step-number" aria-hidden="true">1</span><h2 id="profile-heading">로그인 확인</h2><span class="status">서버 검증 완료</span></div>
+      <div class="stage-heading"><span class="step-number" aria-hidden="true">1</span><h2 id="profile-heading">로그인 완료</h2><span class="status">✓ 로그인됨</span></div>
       <p class="member-name"><bdi>${escape(profile.nickname || "미지 회원")}</bdi><span>님으로 로그인했어요.</span></p>
       <details class="developer-note"><summary>로그인 검증 결과 보기</summary>
+      <p>서버 검증 완료</p>
       <dl class="data">
         ${row("회원 식별자 · sub", profile.sub)}
         ${row("발급자 · iss", verified.issuer)}
