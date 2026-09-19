@@ -2,7 +2,7 @@
 
 별도 웹앱에서 **미지로 로그인 → 동의한 미지 API 조회 → 내 서비스 제공**을 체험하는 예제입니다. 검증한 회원 정보로 자체 세션을 만들고, 선택적으로 회원 API를 연결해 나만의 프로젝트 시작 보드를 저장합니다.
 
-**[라이브 데모](https://oidc-demo.cccv.to)** · **[MiZi OIDC 가이드](https://mcp-auth.cccv.ai/developer/guide/oidc)** · **[공개 Discovery](https://mcp-auth-api.cccv.ai/.well-known/openid-configuration)**
+**[라이브 데모](https://oidc-demo.cccv.to)** · **[개발자 API 가이드](https://oidc-demo.cccv.to/developers)** · **[MiZi OIDC 가이드](https://mcp-auth.cccv.ai/developer/guide/oidc)** · **[공개 Discovery](https://mcp-auth-api.cccv.ai/.well-known/openid-configuration)**
 
 TypeScript · Hono · openid-client · jose · Node.js. 로컬에서는 메모리, AWS에서는 DynamoDB로 일회용 로그인 시도와 로그인 세션을 저장합니다.
 
@@ -68,7 +68,9 @@ sequenceDiagram
 
 ## 로그인 다음에 API와 서비스를 연결하기
 
-화면은 `/`(내 홈), `/profile`(내 정보), `/skills`(내 스킬), `/projects`(프로젝트 보드)로 나뉩니다. 홈 외의 페이지는 로그인해야 열립니다. 기존 세션도 사용할 수 있고, 새 소개·스킬 정보는 사용자가 가져오기 버튼으로 조회할 때 추가됩니다.
+체험 화면은 `/`(내 홈), `/profile`(내 정보), `/skills`(내 스킬), `/projects`(프로젝트 보드)로 나뉩니다. 내 정보·내 스킬·프로젝트는 로그인해야 열립니다. 기존 세션도 사용할 수 있고, 새 소개·스킬 정보는 사용자가 가져오기 버튼으로 조회할 때 추가됩니다.
+
+`/developers`의 **개발자 API 가이드**는 로그인 없이 읽을 수 있습니다. 필요한 권한, 요청·응답 예제, 페이지 조회, 오류 처리와 실제 구현 파일을 한곳에 모았습니다. 페이지의 응답은 설명용 가상 예제이며 회원 세션이나 실제 API를 조회하지 않습니다. 데모 상단의 **API 가이드**에서 열 수 있습니다.
 
 - **로그인 증명:** ID 토큰으로 미지 회원임을 확인합니다.
 - **추가 API 권한:** 프로필 버튼은 `user:profile`, 스킬 버튼은 `user:profile user:skills`를 요청합니다. 이미 스킬을 조회한 세션에서 프로필을 다시 가져오면 스킬도 함께 새로 조회합니다. API에는 접근 토큰을 사용하며 ID 토큰을 보내지 않습니다.
@@ -91,6 +93,7 @@ API 응답은 **조회 당시의 요약**입니다. 토큰은 콜백 처리 중�
 - [`src/`](src): 설정, 로그인 라우트, OIDC 검증, 세션 저장, 화면을 역할별로 분리한 구현
 - [`src/member-api.ts`](src/member-api.ts): Bearer 토큰을 사용하는 실제 회원 API 조회와 최소 응답 추출
 - [`src/extra-api.ts`](src/extra-api.ts): 소개·관심 분야와 스킬 API의 최소 정보 조회
+- [`src/developer-guide.ts`](src/developer-guide.ts): 로그인 없이 읽는 개발자 API 가이드와 가상 응답 예제
 - [`src/service.ts`](src/service.ts): 미지 데이터와 구분되는 데모 자체의 목표·시작 계획
 - [`test/`](test): 정상 로그인과 잘못된 콜백·토큰·재사용을 검증하는 테스트
 - [`infra/template.yml`](infra/template.yml): Lambda + HTTP API + DynamoDB + HTTPS 도메인

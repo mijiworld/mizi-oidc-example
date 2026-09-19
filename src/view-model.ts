@@ -26,7 +26,7 @@ export interface Identity {
 }
 
 export interface HomeViewModel {
-  page?: 'home' | 'profile' | 'skills' | 'projects';
+  page?: 'home' | 'profile' | 'skills' | 'projects' | 'developers';
   skillsVisibleCount?: number;
   issuer: string;
   clientId: string;

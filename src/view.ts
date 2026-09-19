@@ -1,6 +1,8 @@
 import type { HomeViewModel } from "./view-model.js";
 import { styles } from "./styles.js";
 import { PROJECT_PLANS, type MemberApiResult } from "./service.js";
+import { renderDeveloperGuide } from "./developer-guide.js";
+import { developerGuideStyles } from "./developer-guide-styles.js";
 
 const SOURCE = "https://github.com/mijiworld/mizi-oidc-example";
 const GUIDE = "https://mcp-auth.cccv.ai/developer/guide/oidc";
@@ -37,6 +39,7 @@ function row(label: string, value: string): string {
 
 function resources(): string {
   return `<nav class="resources" aria-label="개발자 자료">
+    <a href="/developers">개발자 API 가이드</a>
     <a href="${SOURCE}" target="_blank" rel="noreferrer">GitHub 소스 보기 ↗</a>
     <a href="${GUIDE}" target="_blank" rel="noreferrer">OIDC 연동 가이드 ↗</a>
   </nav>`;
@@ -382,8 +385,10 @@ function success(
 
 export function renderHome(model: HomeViewModel): string {
   const { profile, verification } = model;
+  const isDeveloperGuide = model.page === "developers";
   // 성공 표시는 서버가 전달한 검증 결과가 완전하고 같은 회원을 가리킬 때만 허용한다.
   const checked =
+    !isDeveloperGuide &&
     model.authenticated &&
     profile &&
     verification &&
@@ -398,7 +403,9 @@ export function renderHome(model: HomeViewModel): string {
     verification.issuerResponse === true &&
     verification.userInfoSubject === true;
   const content =
-    checked && profile && verification
+    isDeveloperGuide
+      ? renderDeveloperGuide({ issuer: model.issuer, clientId: model.clientId, baseUrl: model.baseUrl })
+      : checked && profile && verification
       ? success(model, profile, verification)
       : login({
           ...model,
@@ -412,9 +419,9 @@ export function renderHome(model: HomeViewModel): string {
   return `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow"><meta name="referrer" content="strict-origin">
-<meta name="description" content="미지 로그인, 동의한 회원 API 조회, 내 프로젝트 시작 보드까지 경험하는 공개 예제">
-<title>${checked ? (PAGES.find((page) => page.id === (model.page ?? "home"))?.label ?? "내 홈") : "미지로 로그인"} · MiZi OIDC 예제</title><style>${styles}</style></head>
-<body${checked ? ' class="signed-in"' : ""}><div class="wrap"><header class="header"><a class="brand" href="/"><strong>MiZi OIDC</strong><span>연동 예제</span></a><a class="header-link" href="${SOURCE}" target="_blank" rel="noreferrer">소스 코드 ↗</a></header>
+<meta name="description" content="${isDeveloperGuide ? "미지 OIDC 로그인과 회원 API 연동을 위한 권한, 요청·응답 예제, 페이지 조회와 공개 소스 코드 안내" : "미지 로그인, 동의한 회원 API 조회, 내 프로젝트 시작 보드까지 경험하는 공개 예제"}">
+<title>${isDeveloperGuide ? "개발자 API 가이드" : checked ? (PAGES.find((page) => page.id === (model.page ?? "home"))?.label ?? "내 홈") : "미지로 로그인"} · MiZi OIDC 예제</title><style>${styles}${isDeveloperGuide ? developerGuideStyles : ""}</style></head>
+<body${isDeveloperGuide ? ' class="guide-page"' : checked ? ' class="signed-in"' : ""}><div class="wrap"><header class="header"><a class="brand" href="/"><strong>MiZi OIDC</strong><span>연동 예제</span></a><nav class="header-links" aria-label="공개 자료"><a class="header-link" href="/developers"${isDeveloperGuide ? ' aria-current="page"' : ""}>API 가이드</a><a class="header-link" href="${SOURCE}" target="_blank" rel="noreferrer">소스 코드 ↗</a></nav></header>
 ${checked ? `<nav class="site-nav" aria-label="내 서비스 메뉴">${PAGES.map((page) => `<a href="${page.href}"${page.id === (model.page ?? "home") ? ' aria-current="page"' : ""}>${page.label}</a>`).join("")}</nav>` : ""}
 <main>${content}
 <details class="config"><summary>이 데모의 OIDC 설정</summary><dl class="data">${row("Issuer", model.issuer)}${row("Client ID", model.clientId)}${row("서비스 주소", model.baseUrl)}</dl></details>
