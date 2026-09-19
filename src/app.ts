@@ -50,6 +50,9 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     const cookie = getCookie(c, sessionCookie);
     const session = cookie && opaqueSchema.safeParse(cookie).success ? await store.getSession(cookie, seconds()) : null;
     if (cookie && !session) deleteCookie(c, sessionCookie, cookieOptions);
+    // no-referrer can make browser form POSTs send Origin: null. The home document
+    // must retain its origin; redirects and callback/error responses keep no-referrer.
+    c.header('Referrer-Policy', 'strict-origin');
     return c.html(renderHome({
       issuer: config.issuer, clientId: config.clientId, baseUrl: config.baseUrl,
       loginAction: '/login', logoutAction: '/logout', authenticated: Boolean(session),

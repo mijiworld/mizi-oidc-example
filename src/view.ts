@@ -134,7 +134,7 @@ export function renderHome(model: HomeViewModel): string {
 
   return `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex,nofollow"><meta name="referrer" content="strict-origin">
 <meta name="description" content="미지 OIDC 로그인과 서버 검증 결과를 직접 확인하는 공개 예제">
 <title>${checked ? "로그인 확인" : "미지로 로그인"} · MiZi OIDC 예제</title><style>${styles}</style></head>
 <body><div class="wrap"><header class="header"><a class="brand" href="/"><strong>MiZi OIDC</strong><span>연동 예제</span></a><a class="header-link" href="${SOURCE}" target="_blank" rel="noreferrer">소스 코드 ↗</a></header>

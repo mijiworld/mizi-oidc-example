@@ -42,6 +42,36 @@ beforeEach(() => { vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('browser session and callback boundaries', () => {
+  it('preserves home form origins while keeping redirects, callbacks and error responses no-referrer', async () => {
+    const f = fixture();
+    for (const path of ['/', '/?error=login_failed']) {
+      const home = await f.app.request(`${base}${path}`);
+      expect(home.headers.get('referrer-policy')).toBe('strict-origin');
+      expect(await home.text()).toContain('<meta name="referrer" content="strict-origin">');
+    }
+    const flow = await f.begin();
+    expect(flow.response.headers.get('referrer-policy')).toBe('no-referrer');
+    const callback = await f.app.request(flow.callback, { headers: { Cookie: flow.cookie } });
+    expect(callback.headers.get('referrer-policy')).toBe('no-referrer');
+    const cookie = sessionCookie(callback);
+    const loggedInHome = await f.app.request(`${base}/`, { headers: { Cookie: cookie } });
+    expect(loggedInHome.headers.get('referrer-policy')).toBe('strict-origin');
+    expect(await loggedInHome.text()).toContain('<meta name="referrer" content="strict-origin">');
+    const logout = await f.app.request(`${base}/logout`, {
+      method: 'POST', headers: { Origin: base, Cookie: cookie },
+    });
+    expect(logout.headers.get('referrer-policy')).toBe('no-referrer');
+    const failedCallback = await f.app.request(`${base}/auth/callback`);
+    expect(failedCallback.headers.get('referrer-policy')).toBe('no-referrer');
+    const forbidden = await f.app.request(`${base}/login`, { method: 'POST' });
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.headers.get('referrer-policy')).toBe('no-referrer');
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    vi.spyOn(f.store, 'getSession').mockRejectedValueOnce(new Error('unavailable'));
+    const unavailable = await f.app.request(`${base}/`, { headers: { Cookie: cookie } });
+    expect(unavailable.status).toBe(503);
+    expect(unavailable.headers.get('referrer-policy')).toBe('no-referrer');
+  });
   it.each([undefined, 'null', 'https://attacker.example', `${base}/path`])(
     'rejects POST login/logout Origin %s before state changes', async (origin) => {
       const f = fixture();
