@@ -75,7 +75,7 @@ describe('browser session and callback boundaries', () => {
   it.each([undefined, 'null', 'https://attacker.example', `${base}/path`])(
     'rejects POST login/logout Origin %s before state changes', async (origin) => {
       const f = fixture();
-      for (const path of ['/login', '/logout', '/connect-profile', '/service/goal']) {
+      for (const path of ['/login', '/logout', '/connect-profile', '/connect-skills', '/service/goal']) {
         const response = await f.app.request(`${base}${path}`, {
           method: 'POST', headers: origin ? { Origin: origin } : {},
         });
@@ -215,7 +215,49 @@ describe('optional member API and the demo-owned project board', () => {
     expect(response.status).toBe(303);
     expect(f.provider.authorizationUrl.mock.calls[1]![0].readMemberApi).toBe(true);
     expect(response.headers.get('referrer-policy')).toBe('no-referrer');
-    expect((await (await f.app.request(`${base}/client.json`)).json()).scope).toBe('openid profile user:profile');
+    expect((await (await f.app.request(`${base}/client.json`)).json()).scope).toBe('openid profile user:profile user:skills');
+  });
+
+  it('protects each private page and preserves same-origin forms on every authenticated page', async () => {
+    const f = fixture();
+    for (const path of ['/profile', '/skills', '/projects']) {
+      const page = await f.app.request(`${base}${path}`);
+      expect(page.status).toBe(303);
+      expect(page.headers.get('location')).toBe(`${base}/?service_error=login_required`);
+      expect(page.headers.get('referrer-policy')).toBe('no-referrer');
+    }
+    const cookie = await signIn(f, apiIdentity);
+    for (const path of ['/', '/profile', '/skills', '/projects']) {
+      const page = await f.app.request(`${base}${path}`, { headers: { Cookie: cookie } });
+      expect(page.status).toBe(200);
+      expect(page.headers.get('cache-control')).toBe('no-store');
+      expect(page.headers.get('referrer-policy')).toBe('strict-origin');
+      expect(await page.text()).toContain('<meta name="referrer" content="strict-origin">');
+    }
+    const projects = await f.app.request(`${base}/projects`, { headers: { Cookie: cookie } });
+    expect(await projects.text()).toContain('action="/service/goal"');
+    const profile = await f.app.request(`${base}/profile`, { headers: { Cookie: cookie } });
+    expect(await profile.text()).not.toContain('action="/service/goal"');
+  });
+
+  it.each(['profile', 'skills'] as const)('binds the %s API attempt to a fixed return page and ignores a supplied return URL', async (page) => {
+    const f = fixture();
+    const anonymous = await f.app.request(`${base}/connect-${page}`, { method: 'POST', headers: { Origin: base } });
+    expect(anonymous.headers.get('location')).toContain('login_required');
+    const cookie = await signIn(f);
+    f.provider.complete.mockResolvedValueOnce(apiIdentity);
+    const response = await f.app.request(`${base}/connect-${page}?returnPage=https://attacker.example`, {
+      method: 'POST', headers: { Origin: base, Cookie: cookie },
+    });
+    const requested = f.provider.authorizationUrl.mock.calls[1]![0];
+    expect(requested).toMatchObject({ readMemberApi: true, readProfileDetails: true,
+      readSkillsApi: page === 'skills', returnPage: page });
+    const binding = response.headers.getSetCookie()[0]!.split(';')[0]!;
+    const completed = await f.app.request(`${base}/auth/callback?${new URLSearchParams({
+      state: requested.state, code: 'one-use-code', iss: issuer, returnPage: 'https://attacker.example',
+    })}`, { headers: { Cookie: `${cookie}; ${binding}` } });
+    expect(completed.headers.get('location')).toBe(`${base}/${page}`);
+    expect(await f.store.getSession(cookie.split('=')[1]!, Math.floor(Date.now() / 1000))).toBeNull();
   });
 
   it('stores a project choice only in the authenticated demo session, without another provider call', async () => {
@@ -224,13 +266,36 @@ describe('optional member API and the demo-owned project board', () => {
     const id = cookie.split('=')[1]!;
     const before = await f.store.getSession(id, Math.floor(Date.now() / 1000));
     const saved = await choose(f, cookie, 'goal=assistant');
-    expect(saved.headers.get('location')).toBe(`${base}/#project-board`);
+    expect(saved.headers.get('location')).toBe(`${base}/projects#project-board`);
     const after = await f.store.getSession(id, Math.floor(Date.now() / 1000));
     expect(after?.projectGoal).toBe('assistant');
     expect(after?.expiresAt).toBe(before?.expiresAt);
     expect(after?.memberApi).toEqual(apiIdentity.memberApi);
     expect(f.provider.authorizationUrl).toHaveBeenCalledTimes(1);
     expect(f.provider.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes requested skills with the profile instead of copying stale snapshots or a previous project', async () => {
+    const f = fixture();
+    const skillsApi = { status: 'success' as const, subject: identity.profile.sub,
+      endpoint: `${issuer}/v1/me/skills`, fetchedAt: new Date().toISOString(), partial: null,
+      items: [], requestedLimit: 20 as const, returnedCount: 0, hasMore: false, truncated: false };
+    const cookie = await signIn(f, { ...apiIdentity, skillsApi });
+    await choose(f, cookie);
+    f.provider.complete.mockResolvedValueOnce({ ...apiIdentity, skillsApi: {
+      status: 'error', subject: identity.profile.sub, endpoint: `${issuer}/v1/me/skills`,
+      fetchedAt: new Date().toISOString(), reason: 'scope_missing',
+    } });
+    const response = await f.app.request(`${base}/connect-profile`, { method: 'POST', headers: { Origin: base, Cookie: cookie } });
+    const requested = f.provider.authorizationUrl.mock.calls[1]![0];
+    expect(requested).toMatchObject({ readSkillsApi: true, readProfileDetails: true, returnPage: 'profile' });
+    const binding = response.headers.getSetCookie()[0]!.split(';')[0]!;
+    const completed = await f.app.request(`${base}/auth/callback?${new URLSearchParams({
+      state: requested.state, code: 'once', iss: issuer,
+    })}`, { headers: { Cookie: `${cookie}; ${binding}` } });
+    const current = await f.store.getSession(sessionCookie(completed).split('=')[1]!, Math.floor(Date.now() / 1000));
+    expect(current?.skillsApi).toMatchObject({ status: 'error', reason: 'scope_missing' });
+    expect(current?.projectGoal).toBeUndefined();
   });
 
   it('rejects unknown, duplicate and extra form fields without changing the project', async () => {

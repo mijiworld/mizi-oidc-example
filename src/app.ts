@@ -8,6 +8,7 @@ import { ATTEMPT_TTL_SECONDS, SESSION_TTL_SECONDS, digest, opaqueSchema, type St
 import { renderHome } from './view.js';
 import { LoginFailure, type LoginStage } from './login-error.js';
 import { projectGoalSchema } from './service.js';
+import type { HomeViewModel } from './view-model.js';
 
 const random = (): string => randomBytes(32).toString('base64url');
 const seconds = (): number => Math.floor(Date.now() / 1000);
@@ -16,8 +17,8 @@ const errors: Record<string, string> = {
   unavailable: '로그인 서버에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.',
 };
 const serviceErrors: Record<string, string> = {
-  login_required: '로그인한 뒤 프로필 연결을 시작해 주세요.',
-  profile_required: '미지 회원 API를 연결한 뒤 프로젝트 목표를 선택해 주세요.',
+  login_required: '미지로 로그인하면 내 정보와 프로젝트 보드를 이용할 수 있어요.',
+  profile_required: '내 정보 페이지에서 미지 정보를 가져온 뒤 프로젝트 목표를 선택해 주세요.',
   session_expired: '데모 세션이 만료됐습니다. 다시 로그인해 주세요.',
   save_failed: '프로젝트 목표를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.',
 };
@@ -52,37 +53,46 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     client_id: `${config.baseUrl}/client.json`, client_name: 'MiZi OIDC 로그인 예제',
     client_uri: config.baseUrl, redirect_uris: [config.callbackUrl],
     token_endpoint_auth_method: 'none', grant_types: ['authorization_code'], response_types: ['code'],
-    scope: 'openid profile user:profile',
+    scope: 'openid profile user:profile user:skills',
   }));
-  app.get('/', async (c) => {
+  const pages = { '/': 'home', '/profile': 'profile', '/skills': 'skills', '/projects': 'projects' } as const;
+  async function page(c: Context, name: NonNullable<HomeViewModel['page']>) {
     const cookie = getCookie(c, sessionCookie);
     const session = cookie && opaqueSchema.safeParse(cookie).success ? await store.getSession(cookie, seconds()) : null;
     if (cookie && !session) deleteCookie(c, sessionCookie, cookieOptions);
-    // no-referrer can make browser form POSTs send Origin: null. The home document
+    if (name !== 'home' && !session) return c.redirect(`${config.baseUrl}/?service_error=login_required`, 303);
+    // no-referrer can make browser form POSTs send Origin: null. Every form document
     // must retain its origin; redirects and callback/error responses keep no-referrer.
     c.header('Referrer-Policy', 'strict-origin');
     return c.html(renderHome({
+      page: name,
       issuer: config.issuer, clientId: config.clientId, baseUrl: config.baseUrl,
       loginAction: '/login', logoutAction: '/logout', authenticated: Boolean(session),
       ...(session ? { profile: session.profile, verification: session.verification,
-        memberApi: session.memberApi, projectGoal: session.projectGoal } : {}),
+        memberApi: session.memberApi, projectGoal: session.projectGoal,
+        profileDetails: session.profileDetails, skillsApi: session.skillsApi } : {}),
       ...(errors[c.req.query('error') ?? ''] ? { error: errors[c.req.query('error')!] } : {}),
       ...(serviceErrors[c.req.query('service_error') ?? ''] ? { serviceError: serviceErrors[c.req.query('service_error')!] } : {}),
     }));
-  });
+  }
+  for (const [path, name] of Object.entries(pages)) app.get(path, (c) => page(c, name));
 
-  async function startLogin(c: Context, readMemberApi = false) {
+  async function startLogin(c: Context, returnPage?: 'profile' | 'skills') {
     if (c.req.header('Origin') !== config.baseUrl) return c.text('허용되지 않은 요청입니다.', 403);
-    if (readMemberApi) {
+    let readSkillsApi = returnPage === 'skills';
+    if (returnPage) {
       const cookie = getCookie(c, sessionCookie);
       const session = cookie && opaqueSchema.safeParse(cookie).success ? await store.getSession(cookie, seconds()) : null;
       if (!session) return c.redirect(`${config.baseUrl}/?service_error=login_required`, 303);
+      // Refresh previously requested skills alongside profile data rather than carrying
+      // an old snapshot into a new session or silently losing the skills page.
+      readSkillsApi ||= Boolean(session.skillsApi);
     }
     const binding = random();
     const attempt = {
       state: random(), nonce: random(), codeVerifier: random(), bindingHash: digest(binding),
       expiresAt: seconds() + ATTEMPT_TTL_SECONDS,
-      ...(readMemberApi ? { readMemberApi: true } : {}),
+      ...(returnPage ? { readMemberApi: true, readProfileDetails: true, readSkillsApi, returnPage } : {}),
     };
     let stage: LoginStage = 'discovery';
     try {
@@ -97,7 +107,8 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     }
   }
   app.post('/login', (c) => startLogin(c));
-  app.post('/connect-profile', (c) => startLogin(c, true));
+  app.post('/connect-profile', (c) => startLogin(c, 'profile'));
+  app.post('/connect-skills', (c) => startLogin(c, 'skills'));
 
   app.post('/service/goal', bodyLimit({ maxSize: 1024,
     onError: (c) => c.text('요청 내용이 너무 큽니다.', 413) }), async (c) => {
@@ -106,7 +117,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     const session = id && opaqueSchema.safeParse(id).success ? await store.getSession(id, seconds()) : null;
     if (!session) return c.redirect(`${config.baseUrl}/?service_error=session_expired`, 303);
     if (session.memberApi?.status !== 'success' || session.memberApi.profile.id !== session.profile.sub) {
-      return c.redirect(`${config.baseUrl}/?service_error=profile_required`, 303);
+      return c.redirect(`${config.baseUrl}/projects?service_error=profile_required`, 303);
     }
     if (c.req.header('Content-Type')?.split(';')[0]?.trim() !== 'application/x-www-form-urlencoded') {
       return c.text('지원하지 않는 요청 형식입니다.', 415);
@@ -116,10 +127,10 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     if (!goal.success || Array.from(body.entries()).length !== 1) return c.text('프로젝트 목표를 확인해 주세요.', 400);
     try {
       const saved = await store.setProjectGoal(id!, session.profile.sub, goal.data, seconds());
-      return c.redirect(saved ? `${config.baseUrl}/#project-board` : `${config.baseUrl}/?service_error=session_expired`, 303);
+      return c.redirect(saved ? `${config.baseUrl}/projects#project-board` : `${config.baseUrl}/?service_error=session_expired`, 303);
     } catch {
       console.warn('project_save_failed');
-      return c.redirect(`${config.baseUrl}/?service_error=save_failed`, 303);
+      return c.redirect(`${config.baseUrl}/projects?service_error=save_failed`, 303);
     }
   });
 
@@ -147,7 +158,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
       const previous = getCookie(c, sessionCookie);
       if (previous && opaqueSchema.safeParse(previous).success) await store.deleteSession(previous);
       setCookie(c, sessionCookie, id, { ...cookieOptions, maxAge: SESSION_TTL_SECONDS });
-      return c.redirect(`${config.baseUrl}/`, 303);
+      return c.redirect(`${config.baseUrl}/${attempt.returnPage ?? ''}`, 303);
     } catch (error) {
       console.warn('login_failed', { stage: error instanceof LoginFailure ? error.stage : stage });
       return c.redirect(`${config.baseUrl}/?error=login_failed`, 303);

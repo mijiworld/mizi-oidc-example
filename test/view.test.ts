@@ -29,6 +29,52 @@ const verified: HomeViewModel = {
     checkedAt: "2026-09-19T00:00:02.000Z",
   },
 };
+const memberApi: NonNullable<HomeViewModel["memberApi"]> = {
+  status: "success",
+  fetchedAt: "2026-09-19T00:01:00.000Z",
+  profile: { id: "usr_verified", nickname: "API 회원", githubConnected: null },
+};
+const profileDetails: Extract<
+  NonNullable<HomeViewModel["profileDetails"]>,
+  { status: "success" }
+> = {
+  status: "success",
+  subject: "usr_verified",
+  endpoint: "https://issuer.example/v1/me/profile",
+  fetchedAt: "2026-09-19T00:02:00.000Z",
+  partial: false,
+  profile: {
+    bio: "작은 도구를 만듭니다.",
+    role: "개발자",
+    interests: ["웹", "자동화"],
+  },
+};
+const skillsApi: Extract<
+  NonNullable<HomeViewModel["skillsApi"]>,
+  { status: "success" }
+> = {
+  status: "success",
+  subject: "usr_verified",
+  endpoint: "https://issuer.example/v1/me/skills?limit=20",
+  fetchedAt: "2026-09-19T00:03:00.000Z",
+  partial: null,
+  requestedLimit: 20,
+  returnedCount: 1,
+  hasMore: false,
+  truncated: false,
+  items: [
+    {
+      id: "skill_example",
+      name: "TypeScript",
+      source: "github",
+      verificationMethod: "repository",
+      verifiedBy: "example-verifier",
+      verifiedAt: "2026-08-01T00:00:00.000Z",
+      visible: true,
+      visibility: { profile: false, skills: null },
+    },
+  ],
+};
 
 describe("server-rendered OIDC demo", () => {
   it("starts a POST login and explains the public client without loading external assets", () => {
@@ -122,8 +168,13 @@ describe("server-rendered OIDC demo", () => {
   });
 
   it("keeps an existing login but requires additional consent before the API and service steps", () => {
-    const html = renderHome({ ...verified, projectGoal: "website" });
-    expect(html).toContain("서버 검증 완료");
+    const html = renderHome({
+      ...verified,
+      page: "profile",
+      projectGoal: "website",
+    });
+    expect(html).toContain('action="/logout"');
+    expect(html).toContain('href="/profile" aria-current="page"');
     expect(html).toContain('action="/connect-profile" method="post"');
     expect(html).toContain("내 미지 정보 가져오기");
     expect(html).toContain("user:profile");
@@ -131,6 +182,14 @@ describe("server-rendered OIDC demo", () => {
     expect(html).not.toContain("회원 API 조회 완료");
     expect(html).not.toContain('action="/service/goal"');
     expect(html).not.toContain("이 데모에 저장됨");
+    const project = renderHome({
+      ...verified,
+      page: "projects",
+      projectGoal: "website",
+    });
+    expect(project).toContain('href="/profile"');
+    expect(project).not.toContain('action="/service/goal"');
+    expect(project).not.toContain("이 데모에 저장됨");
   });
 
   it.each([
@@ -144,6 +203,7 @@ describe("server-rendered OIDC demo", () => {
     (reason) => {
       const html = renderHome({
         ...verified,
+        page: "profile",
         memberApi: {
           status: "error",
           reason,
@@ -160,6 +220,7 @@ describe("server-rendered OIDC demo", () => {
   it("does not show another member or unlock the service when API identity differs from OIDC", () => {
     const html = renderHome({
       ...verified,
+      page: "profile",
       projectGoal: "assistant",
       memberApi: {
         status: "success",
@@ -189,6 +250,7 @@ describe("server-rendered OIDC demo", () => {
     (githubConnected, label) => {
       const html = renderHome({
         ...verified,
+        page: "profile",
         memberApi: {
           status: "success",
           fetchedAt: "2026-09-19T00:01:00.000Z",
@@ -203,16 +265,17 @@ describe("server-rendered OIDC demo", () => {
       expect(html).toContain("API에서 읽은 이름");
       expect(html).toContain(`GitHub 연결 여부</dt><dd><code>${label}</code>`);
       expect(html).toContain("2026-09-19T00:01:00.000Z");
-      expect(html).toContain('action="/service/goal" method="post"');
+      expect(html).not.toContain('action="/service/goal"');
       expect(html).toContain('action="/connect-profile" method="post"');
-      expect(html).toContain('프로필 다시 가져오기');
-      expect(html).toContain('현재 프로젝트 선택은 초기화됩니다');
+      expect(html).toContain("프로필 다시 가져오기");
+      expect(html).toContain("현재 프로젝트 선택은 초기화됩니다");
     },
   );
 
   it("renders only the selected example plan and explains its local session lifetime", () => {
     const html = renderHome({
       ...verified,
+      page: "projects",
       projectGoal: "automation",
       memberApi: {
         status: "success",
@@ -234,11 +297,15 @@ describe("server-rendered OIDC demo", () => {
     expect(html).toContain("선택을 미지에 저장하지 않습니다");
     expect(html).toContain("strict-origin");
     expect(html).toContain('id="project-board"');
+    expect(html).toContain("실제 프로젝트나 코드를 생성하지 않습니다");
+    expect(html).not.toContain("API에서 읽은 닉네임");
+    expect(html).not.toContain('action="/connect-profile"');
   });
 
   it("escapes API fields and service errors while preserving verified login and API results", () => {
     const html = renderHome({
       ...verified,
+      page: "profile",
       serviceError: "<script>save-error</script>",
       memberApi: {
         status: "success",
@@ -252,7 +319,7 @@ describe("server-rendered OIDC demo", () => {
     });
     expect(html).toContain("&lt;img src=x onerror=&quot;api()&quot;&gt;");
     expect(html).toContain("&lt;script&gt;save-error&lt;/script&gt;");
-    expect(html).toContain("서버 검증 완료");
+    expect(html).toContain('action="/logout"');
     expect(html).toContain("회원 API 조회 완료");
     expect(html).not.toContain("<script>");
     expect(html).not.toContain("<img");
@@ -278,6 +345,7 @@ describe("server-rendered OIDC demo", () => {
   it("keeps an existing verified identity and labels API data as the earlier snapshot after failed consent", () => {
     const html = renderHome({
       ...verified,
+      page: "profile",
       error: "추가 동의를 완료하지 못했습니다.",
       memberApi: {
         status: "success",
@@ -289,8 +357,7 @@ describe("server-rendered OIDC demo", () => {
         },
       },
     });
-    expect(html).toContain("서버 검증 완료");
-    expect(html).toContain("테스트 회원");
+    expect(html).toContain('action="/logout"');
     expect(html).toContain("추가 동의를 완료하지 못했습니다.");
     expect(html).toContain("기존 로그인은 유지됩니다");
     expect(html).toContain("이전 조회 결과");
@@ -298,5 +365,382 @@ describe("server-rendered OIDC demo", () => {
     expect(html).toContain("2026-09-19T00:01:00.000Z");
     expect(html).toContain("이전 API 이름");
     expect(html).not.toContain('action="/login"');
+  });
+
+  it("keeps the home concise even when every API result and a project selection are present", () => {
+    const html = renderHome({
+      ...verified,
+      memberApi,
+      profileDetails,
+      skillsApi,
+      projectGoal: "assistant",
+    });
+    expect(html).toContain("로그인이 완료됐어요");
+    expect(html).toContain("테스트 회원");
+    expect(html).toContain("AI 도구 시작 보드");
+    expect(html).toContain('href="/profile"');
+    expect(html).toContain('href="/skills"');
+    expect(html).toContain('href="/projects"');
+    expect(html).not.toContain('action="/connect-profile"');
+    expect(html).not.toContain('action="/connect-skills"');
+    expect(html).not.toContain('action="/service/goal"');
+    expect(html).not.toContain("작은 도구를 만듭니다.");
+    expect(html).not.toContain("TypeScript");
+    expect(html).not.toContain('id="project-board"');
+  });
+
+  it.each([
+    ["home", "/"],
+    ["profile", "/profile"],
+    ["skills", "/skills"],
+    ["projects", "/projects"],
+  ] as const)(
+    "marks only the current %s page and keeps private content out of anonymous views",
+    (page, path) => {
+      const html = renderHome({ ...verified, page });
+      expect(html).toContain(`href="${path}" aria-current="page"`);
+      expect(html.match(/<a[^>]+aria-current="page"/g)).toHaveLength(1);
+      const loggedOut = renderHome({
+        ...anonymous,
+        page,
+        memberApi,
+        profileDetails,
+        skillsApi,
+      });
+      expect(loggedOut).toContain('action="/login" method="post"');
+      expect(loggedOut).not.toMatch(/<a[^>]+aria-current="page"/);
+      expect(loggedOut).not.toContain("작은 도구를 만듭니다.");
+      expect(loggedOut).not.toContain("TypeScript");
+      expect(loggedOut).not.toContain("API 회원");
+    },
+  );
+
+  it("shows only profile fields and preserves the source snapshot without treating partial data as complete", () => {
+    const html = renderHome({
+      ...verified,
+      page: "profile",
+      memberApi,
+      profileDetails: { ...profileDetails, partial: true },
+      skillsApi,
+    });
+    expect(html).toContain("작은 도구를 만듭니다.");
+    expect(html).toContain("회원이 작성한 소개와 관심 분야입니다");
+    expect(html).toContain("개발자");
+    expect(html).toContain("<li>웹</li>");
+    expect(html).toContain("일부 정보만 가져왔어요");
+    expect(html).toContain(profileDetails.fetchedAt);
+    expect(html).toContain(profileDetails.endpoint);
+    expect(html).toContain("usr_verified");
+    expect(html).toContain("이전에 조회한 스킬도 함께 새로 가져옵니다");
+    expect(html).toContain("프로필·스킬 읽기 권한이 표시됩니다");
+    expect(html).not.toContain("TypeScript");
+    expect(html).not.toContain('action="/connect-skills"');
+    expect(html).not.toContain('action="/service/goal"');
+  });
+
+  it("distinguishes absent profile fields from explicitly empty interests", () => {
+    const html = renderHome({
+      ...verified,
+      page: "profile",
+      memberApi,
+      profileDetails: {
+        ...profileDetails,
+        partial: null,
+        profile: { bio: null, role: null, interests: null },
+      },
+    });
+    expect(html).toContain("이번 응답에 소개 정보가 없어요");
+    expect(html).toContain("이번 응답에 역할 정보가 없어요");
+    expect(html).toContain("이번 응답에 관심 분야 정보가 없어요");
+    expect(html).toContain("전체 정보가 포함됐는지는 확인할 수 없어요");
+    expect(html).not.toContain("관심 분야가 비어 있어요");
+    const empty = renderHome({
+      ...verified,
+      page: "profile",
+      memberApi,
+      profileDetails: {
+        ...profileDetails,
+        profile: { ...profileDetails.profile, interests: [] },
+      },
+    });
+    expect(empty).toContain("이번 조회에서 관심 분야가 비어 있어요");
+    expect(empty).not.toContain("이번 응답에 관심 분야 정보가 없어요");
+  });
+
+  it("escapes expanded profile fields and does not render unprojected contact data", () => {
+    const extra = {
+      ...profileDetails,
+      profile: {
+        bio: "<script>bio</script>",
+        role: '<img src=x onerror="role()">',
+        interests: ['<svg onload="interest()">'],
+        contact: "private@example.com",
+        location: "private-location",
+      },
+    };
+    const html = renderHome({
+      ...verified,
+      page: "profile",
+      memberApi,
+      profileDetails: extra,
+    });
+    expect(html).toContain("&lt;script&gt;bio&lt;/script&gt;");
+    expect(html).toContain("&lt;img src=x onerror=&quot;role()&quot;&gt;");
+    expect(html).toContain("&lt;svg onload=&quot;interest()&quot;&gt;");
+    expect(html).not.toMatch(/<script|<img|<svg/);
+    expect(html).not.toContain("private@example.com");
+    expect(html).not.toContain("private-location");
+  });
+
+  it("keeps the member snapshot when profile expansion fails, but hides another subject’s profile", () => {
+    for (const details of [
+      { ...profileDetails, subject: "usr_other" },
+      {
+        status: "error",
+        subject: "usr_verified",
+        endpoint: profileDetails.endpoint,
+        fetchedAt: profileDetails.fetchedAt,
+        reason: "unavailable",
+      },
+    ] as NonNullable<HomeViewModel["profileDetails"]>[]) {
+      const html = renderHome({
+        ...verified,
+        page: "profile",
+        memberApi,
+        profileDetails: details,
+      });
+      expect(html).toContain("회원 API 조회 완료");
+      expect(html).toContain("소개와 관심 분야를 가져오지 못했어요");
+      expect(html).toContain('action="/logout"');
+      expect(html).not.toContain("작은 도구를 만듭니다.");
+      expect(html).not.toContain("usr_other");
+      expect(html).not.toContain('action="/login"');
+    }
+  });
+
+  it("offers a separate skills consent without representing a successful API call", () => {
+    const html = renderHome({ ...verified, page: "skills" });
+    expect(html).toContain('action="/connect-skills" method="post"');
+    expect(html).toContain("프로필·스킬 읽기에 동의하면");
+    expect(html).toContain("user:profile");
+    expect(html).toContain("user:skills");
+    expect(html).toContain("GET /v1/me/skills?limit=20");
+    expect(html).toContain("이 단계를 건너뛰어도 로그인은 완료된 상태예요");
+    expect(html).not.toContain("조회한 스킬 목록");
+    expect(html).not.toContain('action="/service/goal"');
+  });
+
+  it.each([
+    "scope_missing",
+    "unauthorized",
+    "forbidden",
+    "unavailable",
+    "invalid_response",
+  ] as const)(
+    "keeps login after a skills %s error and offers another consent attempt",
+    (reason) => {
+      const html = renderHome({
+        ...verified,
+        page: "skills",
+        skillsApi: {
+          status: "error",
+          subject: "usr_verified",
+          endpoint: skillsApi.endpoint,
+          fetchedAt: skillsApi.fetchedAt,
+          reason,
+        },
+      });
+      expect(html).toContain('role="alert"');
+      expect(html).toContain('action="/connect-skills" method="post"');
+      expect(html).toContain('action="/logout"');
+      expect(html).not.toContain("조회한 스킬 목록");
+      expect(html).not.toContain('action="/login"');
+    },
+  );
+
+  it("shows actual skill provenance and distinguishes provided verification time from fetch time", () => {
+    const html = renderHome({
+      ...verified,
+      page: "skills",
+      memberApi,
+      profileDetails,
+      skillsApi,
+    });
+    expect(html).toContain("TypeScript");
+    expect(html).toContain("원출처 · github");
+    expect(html).toContain("검증 방법</dt><dd><code>repository");
+    expect(html).toContain("검증 주체</dt><dd><code>example-verifier");
+    expect(html).toContain(
+      "제공된 검증 시각</dt><dd><code>2026-08-01T00:00:00.000Z",
+    );
+    expect(html).toContain(skillsApi.fetchedAt);
+    expect(html).toContain("프로필 표시</dt><dd><code>숨김");
+    expect(html).toContain("스킬 목록 표시</dt><dd><code>정보 없음");
+    expect(html).toContain("조회 대상 · 로그인 회원");
+    expect(html).toContain(
+      "개별 스킬의 소유자 정보는 이 API 응답에 포함되지 않습니다",
+    );
+    expect(html).not.toContain("작은 도구를 만듭니다.");
+    expect(html).not.toContain('action="/service/goal"');
+  });
+
+  it("does not invent verification claims or replace unknown verification time with fetch time", () => {
+    const html = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: {
+        ...skillsApi,
+        items: [
+          {
+            ...skillsApi.items[0]!,
+            verificationMethod: null,
+            verifiedBy: null,
+            verifiedAt: null,
+          },
+        ],
+      },
+    });
+    expect(html).toContain("검증 방법</dt><dd><code>정보 없음");
+    expect(html).toContain("검증 주체</dt><dd><code>정보 없음");
+    expect(html).toContain(
+      "제공된 검증 시각</dt><dd><code>검증 시각 정보 없음",
+    );
+    expect(html).not.toContain(
+      `제공된 검증 시각</dt><dd><code>${skillsApi.fetchedAt}`,
+    );
+    expect(html).not.toContain("검증된 스킬");
+  });
+
+  it("makes known sources readable while retaining original provenance values and unknown strings", () => {
+    const sources = [
+      "github_analysis",
+      "national_cert",
+      "language_test",
+      "degree",
+      "license",
+      "future_source",
+      "__proto__",
+    ];
+    const html = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: {
+        ...skillsApi,
+        items: sources.map((source, index) => ({
+          ...skillsApi.items[0]!,
+          id: `skill_${index}`,
+          source,
+          verificationMethod:
+            index === 0 ? "github_analysis" : "unknown_method",
+        })),
+        returnedCount: sources.length,
+      },
+    });
+    for (const label of [
+      "GitHub 분석",
+      "국가 자격",
+      "어학 시험",
+      "학위",
+      "면허",
+      "future_source",
+      "__proto__",
+    ]) {
+      expect(html).toContain(`원출처 · ${label}`);
+    }
+    for (const source of sources)
+      expect(html).toContain(`원출처 코드</dt><dd><code>${source}`);
+    expect(html).toContain("검증 방법</dt><dd><code>GitHub 분석");
+    expect(html).toContain("검증 방법 원문</dt><dd><code>github_analysis");
+    expect(html).toContain("검증 방법</dt><dd><code>unknown_method");
+  });
+
+  it("uses a snapshot-specific empty state and never claims the member has no skills", () => {
+    const html = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: { ...skillsApi, items: [], returnedCount: 0 },
+    });
+    expect(html).toContain("이번 조회에서 표시할 스킬이 없어요");
+    expect(html).toContain("전체 정보가 포함됐는지는 확인할 수 없어요");
+    expect(html).toContain('action="/connect-skills"');
+    expect(html).not.toContain("스킬이 전혀 없");
+    expect(html).not.toContain("TypeScript");
+  });
+
+  it("labels truncation separately from server pagination and does not promise a complete list", () => {
+    const html = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: {
+        ...skillsApi,
+        items: Array.from({ length: 20 }, (_, i) => ({
+          ...skillsApi.items[0]!,
+          id: `skill_${i}`,
+          name: `스킬 ${i}`,
+        })),
+        returnedCount: 31,
+        hasMore: false,
+        truncated: true,
+      },
+    });
+    expect(html).toContain("조회한 결과 중 최대 20개 미리보기");
+    expect(html).toContain("현재 20개 표시");
+    expect(html).toContain("이번 응답에 더 많은 항목이 있어 일부만 표시합니다");
+    expect(html).toContain("후속 페이지 안내</dt><dd><code>없음");
+    expect(html).toContain("이번 API 응답 항목 수</dt><dd><code>31");
+    expect(html).not.toContain("전체 20개");
+    expect(html).not.toContain("모든 스킬");
+    const next = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: { ...skillsApi, hasMore: true },
+    });
+    expect(next).toContain("API가 후속 결과가 있음을 알렸습니다");
+    expect(next).not.toContain("다음 페이지</a>");
+  });
+
+  it("hides skills for another subject even if other session API results succeeded", () => {
+    const html = renderHome({
+      ...verified,
+      page: "skills",
+      memberApi,
+      skillsApi: { ...skillsApi, subject: "usr_other" },
+    });
+    expect(html).toContain(
+      "로그인한 계정의 스킬 조회 결과를 확인하지 못했어요",
+    );
+    expect(html).not.toContain("TypeScript");
+    expect(html).not.toContain("조회한 스킬 목록");
+    expect(html).not.toContain("usr_other");
+  });
+
+  it("escapes skill fields and preserves snapshots when a later consent is denied", () => {
+    const html = renderHome({
+      ...verified,
+      page: "skills",
+      memberApi,
+      error: "추가 동의를 취소했습니다.",
+      skillsApi: {
+        ...skillsApi,
+        items: [
+          {
+            ...skillsApi.items[0]!,
+            id: "<img src=x>",
+            name: "<script>name</script>",
+            source: "<svg source>",
+            verificationMethod: "<b>method</b>",
+            verifiedBy: "<iframe verifier>",
+          },
+        ],
+      },
+    });
+    expect(html).toContain("&lt;script&gt;name&lt;/script&gt;");
+    expect(html).toContain("&lt;svg source&gt;");
+    expect(html).toContain("&lt;b&gt;method&lt;/b&gt;");
+    expect(html).toContain("&lt;iframe verifier&gt;");
+    expect(html).toContain("&lt;img src=x&gt;");
+    expect(html).toContain("기존 로그인은 유지됩니다");
+    expect(html).toContain("조회 시점의 정보");
+    expect(html).not.toMatch(/<script|<img|<svg|<iframe/);
   });
 });
