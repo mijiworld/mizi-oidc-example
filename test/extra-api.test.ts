@@ -3,7 +3,8 @@ import {
   readProfileDetails, readSkillsApi, profileDetailsResource, skillsApiResource,
 } from '../src/extra-api.js';
 import {
-  MAX_EXTRA_API_RESPONSE_BYTES, profileDetailsResultSchema, skillsApiResultSchema,
+  MAX_EXTRA_API_RESPONSE_BYTES, MAX_SKILLS_SNAPSHOT_BYTES, MAX_SKILLS_COLLECTION_BYTES,
+  profileDetailsResultSchema, skillsApiResultSchema,
 } from '../src/extra-api-model.js';
 
 const issuer = 'https://issuer.example';
@@ -145,7 +146,7 @@ describe('profile details projection and subject binding', () => {
   });
 });
 
-describe('skills provenance and bounded first-page snapshot', () => {
+describe('skills provenance and bounded collection', () => {
   it('retains only provided source, method, verifier, original verification timestamp and visibility', async () => {
     const result = await readSkillsApi(issuer, token, scopes, subject, reply({
       ...skills, items: [{ ...skill, valuation: { amount: 300000, currency: 'KRW' }, repository_url: 'https://private.example/repo' }],
@@ -165,18 +166,20 @@ describe('skills provenance and bounded first-page snapshot', () => {
         visible: null, visibility: { profile: null, skills: null } }] });
     if (result.status === 'success') expect(result.items[0]).not.toHaveProperty('status');
   });
-  it('records a larger merged first response as a preview, even when its MiZi cursor is null', async () => {
+  it('keeps the merged first response beyond 20 when its MiZi cursor is null', async () => {
     const items = Array.from({ length: 25 }, (_, index) => ({ ...skill, id: `skl_${index}` }));
     const result = await readSkillsApi(issuer, token, scopes, subject, reply({ items, next_cursor: null }));
-    expect(result).toMatchObject({ status: 'success', returnedCount: 25, truncated: true, hasMore: false, requestedLimit: 20 });
+    expect(result).toMatchObject({ status: 'success', returnedCount: 25, truncated: false, hasMore: false, requestedLimit: 20,
+      collection: { pages: 1, stoppedReason: 'cursor_exhausted', duplicateCount: 0 } });
     if (result.status === 'success') {
-      expect(result.items).toHaveLength(20);
-      expect(result.items.at(-1)!.id).toBe('skl_19');
+      expect(result.items).toHaveLength(25);
+      expect(result.items.at(-1)!.id).toBe('skl_24');
     }
   });
   it('preserves cursor availability without retaining the opaque cursor or promising complete coverage', async () => {
     const result = await readSkillsApi(issuer, token, scopes, subject, reply({ ...skills, next_cursor: 'opaque-cursor-not-retained', partial: true }));
-    expect(result).toMatchObject({ status: 'success', hasMore: true, partial: true, truncated: false });
+    expect(result).toMatchObject({ status: 'success', hasMore: true, partial: true, truncated: true,
+      collection: { stoppedReason: 'cursor_cycle' } });
     expect(JSON.stringify(result)).not.toContain('opaque-cursor-not-retained');
     expect(await readSkillsApi(issuer, token, scopes, subject, reply({ items: [], next_cursor: null })))
       .toMatchObject({ status: 'success', items: [], returnedCount: 0, hasMore: false, partial: null });
@@ -219,4 +222,163 @@ it('resource helpers keep the issuer origin, omit query parameters and reject in
   expect(skillsApiResource(`${issuer}/tenant`)).toBe(`${issuer}/v1/me/skills`);
   expect(() => profileDetailsResource('http://insecure.example')).toThrow();
   expect(() => skillsApiResource('https://user:password@issuer.example')).toThrow();
+});
+
+describe('bounded skills pagination', () => {
+  const batch = (start: number, count: number) => Array.from({ length: count }, (_, index) => ({ ...skill, id: `skl_${start + index}` }));
+  const sequence = (...bodies: unknown[]) => vi.fn<typeof fetch>(async () => {
+    if (!bodies.length) throw new Error('Unexpected extra page.');
+    return Response.json(bodies.shift());
+  });
+
+  it('collects the complete merged first page then follows an opaque cursor only on the fixed endpoint', async () => {
+    const cursor = 'private-cursor+https://attacker.example/?token=never-send';
+    const fetcher = sequence({ items: batch(0, 25), next_cursor: cursor },
+      { items: [{ ...skill, id: 'skl_1', name: 'changed later claim' }, ...batch(25, 20)], next_cursor: null });
+    const result = await readSkillsApi(issuer, token, scopes, subject, fetcher);
+    expect(result).toMatchObject({ status: 'success', returnedCount: 46, hasMore: false, truncated: false,
+      collection: { pages: 2, stoppedReason: 'cursor_exhausted', duplicateCount: 1 } });
+    if (result.status !== 'success') throw new Error('Expected collection.');
+    expect(result.items).toHaveLength(45);
+    expect(result.items[1]!.name).toBe(skill.name);
+    const second = new URL(String(fetcher.mock.calls[1]![0]));
+    expect(second.origin).toBe(issuer);
+    expect(second.pathname).toBe('/v1/me/skills');
+    expect(second.searchParams.get('cursor')).toBe(cursor);
+    expect(second.searchParams.get('limit')).toBe('20');
+    expect(fetcher.mock.calls[0]![1]!.signal).toBe(fetcher.mock.calls[1]![1]!.signal);
+    expect(JSON.stringify(result)).not.toContain(cursor);
+    expect(JSON.stringify(result)).not.toContain(token);
+    expect(skillsApiResultSchema.safeParse(result).success).toBe(true);
+    expect(Date.parse(result.fetchedAt)).toBeGreaterThanOrEqual(Date.parse(result.collection!.startedAt));
+  });
+
+  it('retains at most 200 unique items even when all CCCV rows arrive with a null cursor', async () => {
+    const fetcher = sequence({ items: batch(0, 205), next_cursor: null });
+    const result = await readSkillsApi(issuer, token, scopes, subject, fetcher);
+    expect(result).toMatchObject({ status: 'success', returnedCount: 205, hasMore: false, truncated: true,
+      collection: { pages: 1, stoppedReason: 'item_limit' } });
+    if (result.status === 'success') expect(result.items).toHaveLength(200);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the first claim for duplicate ids even when later claim fields are malformed', async () => {
+    const fetcher = sequence({ items: [skill, { id: skill.id, name: false }], next_cursor: 'next' },
+      { items: [{ id: skill.id, verified_at: 'invalid replacement' }], next_cursor: null });
+    const result = await readSkillsApi(issuer, token, scopes, subject, fetcher);
+    expect(result).toMatchObject({ status: 'success', returnedCount: 3, truncated: false,
+      collection: { pages: 2, duplicateCount: 2 }, items: [{ name: skill.name, verifiedAt: skill.verified_at }] });
+    if (result.status === 'success') expect(result.items).toHaveLength(1);
+  });
+
+  it('does not label an exact 200-item terminal response as truncated', async () => {
+    const result = await readSkillsApi(issuer, token, scopes, subject, sequence({ items: batch(0, 200), next_cursor: null }));
+    expect(result).toMatchObject({ status: 'success', truncated: false, collection: { stoppedReason: 'cursor_exhausted' } });
+  });
+
+  it('limits calls even when empty pages keep returning different cursors', async () => {
+    let count = 0;
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ items: [], next_cursor: `cursor-${++count}` }));
+    const result = await readSkillsApi(issuer, token, scopes, subject, fetcher);
+    expect(result).toMatchObject({ status: 'success', items: [], hasMore: true, truncated: true,
+      collection: { pages: 10, stoppedReason: 'page_limit' } });
+    expect(fetcher).toHaveBeenCalledTimes(10);
+  });
+
+  it('detects a cursor cycle without issuing another request for the same cursor', async () => {
+    const fetcher = sequence({ items: batch(0, 1), next_cursor: 'a' },
+      { items: batch(1, 1), next_cursor: 'b' }, { items: batch(2, 1), next_cursor: 'a' });
+    const result = await readSkillsApi(issuer, token, scopes, subject, fetcher);
+    expect(result).toMatchObject({ status: 'success', collection: { pages: 3, stoppedReason: 'cursor_cycle' }, truncated: true });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps unknown pagination distinct from cursor exhaustion and API partial state', async () => {
+    const result = await readSkillsApi(issuer, token, scopes, subject, sequence({ items: [skill], partial: false }));
+    expect(result).toMatchObject({ status: 'success', partial: false, hasMore: null, truncated: true,
+      collection: { stoppedReason: 'unknown_cursor' } });
+  });
+
+  it.each([401, 403, 500])('keeps the confirmed prefix if a later page returns %s', async (status) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ ...skills, next_cursor: 'private-cursor' }))
+      .mockResolvedValueOnce(Response.json({ secret: token }, { status }));
+    const result = await readSkillsApi(issuer, token, scopes, subject, fetcher);
+    expect(result).toMatchObject({ status: 'success', returnedCount: 1, hasMore: true, truncated: true,
+      collection: { pages: 1, stoppedReason: 'upstream_error' } });
+    if (result.status === 'success') expect(result.items).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain(token);
+    expect(JSON.stringify(result)).not.toContain('private-cursor');
+  });
+
+  it.each([
+    () => new Response('{invalid', { headers: { 'Content-Type': 'application/json' } }),
+    () => Response.json({ items: [...batch(1, 1), { id: 'bad' }], next_cursor: null }),
+  ])('does not commit malformed later pages over a confirmed prefix', async (response) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ ...skills, next_cursor: 'next' }))
+      .mockResolvedValueOnce(response());
+    const result = await readSkillsApi(issuer, token, scopes, subject, fetcher);
+    expect(result).toMatchObject({ status: 'success', returnedCount: 1, hasMore: true,
+      collection: { pages: 1, stoppedReason: 'invalid_response' } });
+    if (result.status === 'success') expect(result.items).toHaveLength(1);
+  });
+
+  it('honors the shared deadline during a stalled response body and cancels its reader', async () => {
+    const controller = new AbortController();
+    let cancel = false;
+    let reading!: () => void;
+    const readingStarted = new Promise<void>((resolve) => { reading = resolve; });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ ...skills, next_cursor: 'next' }))
+      .mockImplementationOnce(async () => new Response(new ReadableStream<Uint8Array>({
+        pull() { reading(); }, cancel() { cancel = true; },
+      }), { headers: { 'Content-Type': 'application/json' } }));
+    const pending = readSkillsApi(issuer, token, scopes, subject, fetcher, { signal: controller.signal });
+    await readingStarted;
+    controller.abort();
+    const result = await pending;
+    expect(result).toMatchObject({ status: 'success', collection: { pages: 1, stoppedReason: 'time_limit' }, truncated: true });
+    expect(cancel).toBe(true);
+  });
+
+  it('does not fetch after an already elapsed shared budget', async () => {
+    const controller = new AbortController(); controller.abort();
+    const fetcher = reply(skills);
+    expect(await readSkillsApi(issuer, token, scopes, subject, fetcher, { signal: controller.signal }))
+      .toMatchObject({ status: 'error', reason: 'unavailable' });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('caps cumulative raw bytes even when the large discarded fields are not retained', async () => {
+    let count = 0;
+    const padding = 'x'.repeat(230 * 1024);
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ items: batch(count, 1),
+      next_cursor: `next-${++count}`, discarded: padding }));
+    const result = await readSkillsApi(issuer, token, scopes, subject, fetcher);
+    expect(result).toMatchObject({ status: 'success', collection: { pages: 4, stoppedReason: 'byte_limit' }, truncated: true });
+    expect(fetcher).toHaveBeenCalledTimes(5);
+    expect(padding.length * 5).toBeGreaterThan(MAX_SKILLS_COLLECTION_BYTES);
+    expect(JSON.stringify(result)).not.toContain(padding);
+  });
+
+  it('caps the UTF-8 projected snapshot below 192KiB and rejects oversized stored snapshots', async () => {
+    const large = { ...skill, name: '\u0000'.repeat(200), source: '\u0000'.repeat(100),
+      verification_method: '\u0000'.repeat(200), verified_by: '\u0000'.repeat(500) };
+    let count = 0;
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ items: Array.from({ length: 20 },
+      () => ({ ...large, id: `skl_${count++}` })), next_cursor: `next-${count}` }));
+    const result = await readSkillsApi(issuer, token, scopes, subject, fetcher);
+    expect(result).toMatchObject({ status: 'success', truncated: true, collection: { stoppedReason: 'byte_limit' } });
+    if (result.status !== 'success') throw new Error('Expected prefix.');
+    expect(result.items.length).toBeGreaterThan(20);
+    expect(result.items.length).toBeLessThan(200);
+    expect(Buffer.byteLength(JSON.stringify(result), 'utf8')).toBeLessThanOrEqual(MAX_SKILLS_SNAPSHOT_BYTES);
+    expect(skillsApiResultSchema.safeParse(result).success).toBe(true);
+    expect(skillsApiResultSchema.safeParse({ ...result, items: Array(200).fill(result.items[0]) }).success).toBe(false);
+  });
+
+  it('keeps old first-page snapshots valid when collection metadata is absent', async () => {
+    const result = await readSkillsApi(issuer, token, scopes, subject, reply(skills));
+    if (result.status !== 'success') throw new Error('Expected snapshot.');
+    const { collection: _collection, ...oldSnapshot } = result;
+    expect(skillsApiResultSchema.safeParse(oldSnapshot).success).toBe(true);
+  });
 });
