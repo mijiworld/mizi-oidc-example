@@ -1,6 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { attemptSchema, digest, sessionSchema, type Attempt, type Session, type Store } from './store.js';
+import { projectGoalSchema, type ProjectGoal } from './service.js';
 
 export class DynamoStore implements Store {
   constructor(
@@ -51,5 +52,22 @@ export class DynamoStore implements Store {
   }
   async deleteSession(id: string): Promise<void> {
     await this.db.send(new DeleteCommand({ TableName: this.table, Key: { pk: `session:${digest(id)}` } }));
+  }
+  async setProjectGoal(id: string, subject: string, goal: ProjectGoal, now: number): Promise<boolean> {
+    try {
+      await this.db.send(new UpdateCommand({
+        TableName: this.table, Key: { pk: `session:${digest(id)}` },
+        UpdateExpression: 'SET #goal = :goal',
+        ConditionExpression: 'attribute_exists(pk) AND expiresAt > :now AND #profile.#sub = :subject AND #api.#status = :success AND #api.#profile.#id = :subject',
+        ExpressionAttributeNames: { '#goal': 'projectGoal', '#profile': 'profile', '#sub': 'sub',
+          '#api': 'memberApi', '#status': 'status', '#id': 'id' },
+        ExpressionAttributeValues: { ':goal': projectGoalSchema.parse(goal), ':now': now,
+          ':subject': subject, ':success': 'success' },
+      }));
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') return false;
+      throw error;
+    }
   }
 }

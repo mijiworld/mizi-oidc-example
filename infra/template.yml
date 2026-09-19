@@ -66,6 +66,7 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:PutItem
                   - dynamodb:DeleteItem
+                  - dynamodb:UpdateItem
                 Resource: !GetAtt Sessions.Arn
               - Effect: Allow
                 Action:

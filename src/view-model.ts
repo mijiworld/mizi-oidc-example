@@ -1,3 +1,5 @@
+import type { MemberApiResult, ProjectGoal } from './service.js';
+
 /** Only verified profile data reaches the page. Tokens never enter this model. */
 export interface Verification {
   issuer: string;
@@ -17,6 +19,7 @@ export interface Verification {
 export interface Identity {
   profile: { sub: string; nickname?: string };
   verification: Verification;
+  memberApi?: MemberApiResult;
 }
 
 export interface HomeViewModel {
@@ -28,5 +31,8 @@ export interface HomeViewModel {
   authenticated: boolean;
   profile?: Identity['profile'];
   verification?: Verification;
+  memberApi?: MemberApiResult;
+  projectGoal?: ProjectGoal;
+  serviceError?: string;
   error?: string;
 }

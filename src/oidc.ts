@@ -6,6 +6,7 @@ import type { Config } from './config.js';
 import type { Attempt } from './store.js';
 import type { Identity } from './view-model.js';
 import { LoginFailure, type LoginStage } from './login-error.js';
+import { memberApiResource, readMemberApi } from './member-api.js';
 
 export interface OidcProvider {
   authorizationUrl(attempt: Attempt): Promise<string>;
@@ -80,7 +81,8 @@ export class MiziOidcProvider implements OidcProvider {
     const configuration = await this.configuration();
     return client.buildAuthorizationUrl(configuration, {
       redirect_uri: this.settings.callbackUrl,
-      scope: 'openid profile', response_type: 'code',
+      scope: attempt.readMemberApi ? 'openid profile user:profile' : 'openid profile', response_type: 'code',
+      ...(attempt.readMemberApi ? { resource: memberApiResource(this.settings.issuer) } : {}),
       state: attempt.state, nonce: attempt.nonce,
       code_challenge: await client.calculatePKCECodeChallenge(attempt.codeVerifier),
       code_challenge_method: 'S256',
@@ -106,7 +108,7 @@ export class MiziOidcProvider implements OidcProvider {
       const tokens = await client.authorizationCodeGrant(configuration, callback, {
         expectedState: attempt.state, expectedNonce: attempt.nonce,
         pkceCodeVerifier: attempt.codeVerifier, idTokenExpected: true,
-      });
+      }, attempt.readMemberApi ? { resource: memberApiResource(this.settings.issuer) } : undefined);
       stage = 'id_token_validation';
       if (!tokens.id_token) throw new Error('Missing ID token.');
 
@@ -133,10 +135,15 @@ export class MiziOidcProvider implements OidcProvider {
       stage = 'userinfo';
       const profile = profileSchema.parse(await client.fetchUserInfo(configuration, tokens.access_token, claims.sub));
       if (profile.sub !== claims.sub) throw new Error('UserInfo subject mismatch.');
+      stage = 'member_api';
+      const memberApi = attempt.readMemberApi
+        ? await readMemberApi(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, this.fetcher)
+        : undefined;
 
       // No tokens (including an unsolicited refresh token) escape this method or enter storage.
       return {
         profile,
+        ...(memberApi ? { memberApi } : {}),
         verification: {
           issuer: this.settings.issuer, audience: this.settings.clientId, sub: claims.sub,
           algorithm: 'RS256', signature: true, nonce: true, pkce: 'S256', state: true,
