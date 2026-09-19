@@ -240,6 +240,52 @@ describe('optional member API and the demo-owned project board', () => {
     expect(await profile.text()).not.toContain('action="/service/goal"');
   });
 
+  it('reveals the stored skills in batches without another provider call, session rotation, or project reset', async () => {
+    const f = fixture();
+    const skillsApi = { status: 'success' as const, subject: identity.profile.sub,
+      endpoint: `${issuer}/v1/me/skills`, fetchedAt: new Date().toISOString(), partial: null,
+      items: Array.from({ length: 45 }, (_, i) => ({ id: `skill_${i}`,
+        name: `Paged skill ${String(i + 1).padStart(3, '0')}`, source: 'github_analysis',
+        verificationMethod: null, verifiedBy: null, verifiedAt: null,
+        visible: null, visibility: { profile: null, skills: null } })),
+      requestedLimit: 20 as const, returnedCount: 45, hasMore: false, truncated: false,
+      collection: { pages: 3, startedAt: new Date().toISOString(), stoppedReason: 'cursor_exhausted' as const, duplicateCount: 0 },
+    };
+    const cookie = await signIn(f, { ...apiIdentity, skillsApi });
+    await choose(f, cookie);
+    const id = cookie.split('=')[1]!;
+    const before = await f.store.getSession(id, Math.floor(Date.now() / 1000));
+    for (const [shown, last, absent] of [[20, '020', '021'], [40, '040', '041'], [60, '045', '046']] as const) {
+      const page = await f.app.request(`${base}/skills?shown=${shown}`, { headers: { Cookie: cookie } });
+      expect(page.status).toBe(200);
+      expect(page.headers.get('referrer-policy')).toBe('strict-origin');
+      expect(page.headers.getSetCookie()).toHaveLength(0);
+      const html = await page.text();
+      expect(html).toContain(`Paged skill ${last}`);
+      expect(html).not.toContain(`Paged skill ${absent}`);
+    }
+    expect(await f.store.getSession(id, Math.floor(Date.now() / 1000))).toEqual(before);
+    expect(f.provider.authorizationUrl).toHaveBeenCalledTimes(1);
+    expect(f.provider.complete).toHaveBeenCalledTimes(1);
+    await f.app.request(`${base}/logout`, { method: 'POST', headers: { Origin: base, Cookie: cookie } });
+    expect((await f.app.request(`${base}/skills?shown=40`, { headers: { Cookie: cookie } })).headers.get('location'))
+      .toContain('login_required');
+  });
+
+  it.each(['shown=0', 'shown=-20', 'shown=20.5', 'shown=21', 'shown=220', 'shown=99999999999999999',
+    'shown=20&shown=40', 'shown=https%3A%2F%2Fattacker.example', 'shown=NaN', 'shown=', 'shown=2e1'])(
+    'rejects invalid display count %s without changing the signed-in session', async (query) => {
+      const f = fixture();
+      const cookie = await signIn(f, apiIdentity);
+      const response = await f.app.request(`${base}/skills?${query}`, { headers: { Cookie: cookie } });
+      expect(response.status).toBe(400);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(response.headers.getSetCookie()).toHaveLength(0);
+      expect(await response.text()).not.toContain('attacker.example');
+      expect(f.provider.complete).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it.each(['profile', 'skills'] as const)('binds the %s API attempt to a fixed return page and ignores a supplied return URL', async (page) => {
     const f = fixture();
     const anonymous = await f.app.request(`${base}/connect-${page}`, { method: 'POST', headers: { Origin: base } });

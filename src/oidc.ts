@@ -103,6 +103,7 @@ export class MiziOidcProvider implements OidcProvider {
   }
 
   async complete(callback: URL, attempt: Attempt): Promise<Identity> {
+    const startedAt = Date.now();
     let stage: LoginStage = 'callback';
     try {
       // Duplicate parameters are ambiguous across proxies/parsers. Fail before token exchange.
@@ -151,13 +152,19 @@ export class MiziOidcProvider implements OidcProvider {
       const profile = profileSchema.parse(await client.fetchUserInfo(configuration, tokens.access_token, claims.sub));
       if (profile.sub !== claims.sub) throw new Error('UserInfo subject mismatch.');
       stage = 'member_api';
+      // Leave time for session writes within the Lambda's 20-second request budget.
+      // Slow identity verification must reduce the remaining optional API budget.
+      const apiSignal = AbortSignal.timeout(Math.max(0, 12000 - (Date.now() - startedAt)));
+      const apiFetch: typeof fetch = (input, init) => this.fetcher(input, {
+        ...init, signal: AbortSignal.any([apiSignal, ...(init?.signal ? [init.signal] : [])]),
+      });
       const [memberApi, profileDetails, skillsApi] = await Promise.all([
         attempt.readMemberApi
-          ? readMemberApi(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, this.fetcher) : undefined,
+          ? readMemberApi(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, apiFetch) : undefined,
         attempt.readProfileDetails
-          ? readProfileDetails(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, this.fetcher) : undefined,
+          ? readProfileDetails(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, apiFetch, { signal: apiSignal }) : undefined,
         attempt.readSkillsApi
-          ? readSkillsApi(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, this.fetcher) : undefined,
+          ? readSkillsApi(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, apiFetch, { signal: apiSignal }) : undefined,
       ]);
 
       // No tokens (including an unsolicited refresh token) escape this method or enter storage.

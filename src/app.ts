@@ -61,11 +61,22 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     const session = cookie && opaqueSchema.safeParse(cookie).success ? await store.getSession(cookie, seconds()) : null;
     if (cookie && !session) deleteCookie(c, sessionCookie, cookieOptions);
     if (name !== 'home' && !session) return c.redirect(`${config.baseUrl}/?service_error=login_required`, 303);
+    let skillsVisibleCount = 20;
+    if (name === 'skills') {
+      const values = c.req.queries('shown') ?? [];
+      if (values.length > 1 || (values.length === 1 &&
+          (!/^\d{2,3}$/.test(values[0]!) || Number(values[0]) < 20 ||
+           Number(values[0]) > 200 || Number(values[0]) % 20 !== 0))) {
+        return c.text('표시할 스킬 개수를 확인해 주세요.', 400);
+      }
+      if (values.length) skillsVisibleCount = Number(values[0]);
+    }
     // no-referrer can make browser form POSTs send Origin: null. Every form document
     // must retain its origin; redirects and callback/error responses keep no-referrer.
     c.header('Referrer-Policy', 'strict-origin');
     return c.html(renderHome({
       page: name,
+      ...(name === 'skills' ? { skillsVisibleCount } : {}),
       issuer: config.issuer, clientId: config.clientId, baseUrl: config.baseUrl,
       loginAction: '/login', logoutAction: '/logout', authenticated: Boolean(session),
       ...(session ? { profile: session.profile, verification: session.verification,

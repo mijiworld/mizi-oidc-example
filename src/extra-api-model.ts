@@ -1,6 +1,11 @@
 import { z } from 'zod';
 
 export const SKILLS_PREVIEW_LIMIT = 20;
+export const MAX_SKILLS_SNAPSHOT_ITEMS = 200;
+export const MAX_SKILLS_SNAPSHOT_BYTES = 192 * 1024;
+export const MAX_SKILLS_COLLECTION_PAGES = 10;
+export const MAX_SKILLS_COLLECTION_BYTES = 1024 * 1024;
+export const SKILLS_COLLECTION_TIMEOUT_MS = 5000;
 export const MAX_EXTRA_API_RESPONSE_BYTES = 256 * 1024;
 
 const snapshot = {
@@ -43,20 +48,34 @@ export const skillSnapshotSchema = z.object({
   visibility: z.object({ profile: z.boolean().nullable(), skills: z.boolean().nullable() }),
 });
 
+export const skillsCollectionSchema = z.object({
+  pages: z.number().int().min(1).max(MAX_SKILLS_COLLECTION_PAGES),
+  startedAt: z.iso.datetime(),
+  stoppedReason: z.enum(['cursor_exhausted', 'item_limit', 'byte_limit', 'time_limit', 'page_limit',
+    'upstream_error', 'invalid_response', 'cursor_cycle', 'unknown_cursor']),
+  duplicateCount: z.number().int().nonnegative(),
+});
+export type SkillsCollection = z.infer<typeof skillsCollectionSchema>;
+
 export const skillsApiResultSchema = z.discriminatedUnion('status', [
   z.object({
     ...snapshot,
     status: z.literal('success'),
     // The current endpoint has no partial flag, so completeness stays unknown (null).
     partial: z.boolean().nullable(),
-    items: z.array(skillSnapshotSchema).max(SKILLS_PREVIEW_LIMIT),
+    items: z.array(skillSnapshotSchema).max(MAX_SKILLS_SNAPSHOT_ITEMS),
     requestedLimit: z.literal(SKILLS_PREVIEW_LIMIT),
+    // Sum of successful pages' response item counts, including duplicate ids.
     returnedCount: z.number().int().nonnegative(),
     // Only the server's next_cursor, not coverage of CCCV's merged first-page results.
     hasMore: z.boolean().nullable(),
-    // The API may prepend CCCV items and exceed the requested limit. Retain at most 20.
+    // Data was clipped, or collection stopped before the API cursor was exhausted.
     truncated: z.boolean(),
+    // Absent on sessions produced before bounded multi-page collection existed.
+    collection: skillsCollectionSchema.optional(),
   }),
   error,
-]);
+]).refine((result) => result.status !== 'success' ||
+  new TextEncoder().encode(JSON.stringify(result)).byteLength <= MAX_SKILLS_SNAPSHOT_BYTES,
+'Skills snapshot exceeds its storage budget.');
 export type SkillsApiResult = z.infer<typeof skillsApiResultSchema>;

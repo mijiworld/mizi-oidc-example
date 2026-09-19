@@ -107,11 +107,14 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 .snapshot-note { margin-top: 16px; padding: 12px 16px; border-radius: 8px; background: var(--paper); color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .empty-state { margin-top: 20px; padding: 24px 16px; border: 1px dashed var(--line); border-radius: 10px; text-align: center; color: var(--muted); font-size: 14px; }
 .skill-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; list-style: none; margin: 24px 0 0; padding: 0; }
-.skill-item { min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 22px; }
+.skill-item { min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 22px; scroll-margin-top: 96px; }
+.skill-item:target { border-color: var(--green); }
 .skill-item h3 { margin: 0; font-size: 18px; line-height: 1.5; letter-spacing: -.025em; overflow-wrap: anywhere; }
 .skill-source { margin-top: 6px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .skill-data { margin-top: 16px; }
 .skill-item .developer-note { margin-top: 8px; }
+.skills-more { margin-top: 24px; text-align: center; }
+.list-complete { margin-top: 20px; color: var(--muted); font-size: 13px; text-align: center; }
 .refresh-form { margin-top: 18px; }
 .developer-note { margin-top: 20px; color: var(--muted); font-size: 12px; }
 .developer-note summary { cursor: pointer; padding: 6px 0; font-size: 13px; }

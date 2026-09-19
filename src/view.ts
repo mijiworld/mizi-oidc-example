@@ -4,6 +4,11 @@ import { PROJECT_PLANS, type MemberApiResult } from "./service.js";
 
 const SOURCE = "https://github.com/mijiworld/mizi-oidc-example";
 const GUIDE = "https://mcp-auth.cccv.ai/developer/guide/oidc";
+const SKILLS_PER_VIEW = 20;
+type SkillsSnapshot = Extract<
+  NonNullable<HomeViewModel["skillsApi"]>,
+  { status: "success" }
+>;
 
 const PAGES = [
   { id: "home", href: "/", label: "내 홈" },
@@ -191,20 +196,63 @@ function sourceLabel(source: string): string {
 }
 
 function skillCard(
-  skill: Extract<
-    NonNullable<HomeViewModel["skillsApi"]>,
-    { status: "success" }
-  >["items"][number],
+  skill: SkillsSnapshot["items"][number],
+  index: number,
 ): string {
   const method =
     skill.verificationMethod === "github_analysis"
       ? "GitHub 분석"
       : skill.verificationMethod || "정보 없음";
-  return `<li class="skill-item"><h3><bdi>${escape(skill.name)}</bdi></h3>
+  return `<li class="skill-item" id="skill-${index + 1}" tabindex="-1"><h3><bdi>${escape(skill.name)}</bdi></h3>
     <p class="skill-source">원출처 · ${escape(sourceLabel(skill.source))}</p>
     <dl class="data skill-data">${row("검증 방법", method)}${row("검증 주체", skill.verifiedBy || "정보 없음")}${row("제공된 검증 시각", skill.verifiedAt || "검증 시각 정보 없음")}</dl>
     <details class="developer-note"><summary>API 원본 값과 표시 설정</summary><dl class="data">${row("스킬 ID", skill.id)}${row("원출처 코드", skill.source)}${row("검증 방법 원문", skill.verificationMethod || "정보 없음")}${row("표시 설정", visibility(skill.visible))}${row("프로필 표시", visibility(skill.visibility.profile))}${row("스킬 목록 표시", visibility(skill.visibility.skills))}</dl></details>
   </li>`;
+}
+
+function collectionNotice(skills: SkillsSnapshot): string {
+  if (!skills.collection) {
+    return skills.hasMore || skills.truncated
+      ? '<p class="snapshot-note">이전에 저장한 목록입니다. 나머지를 보려면 한 번 다시 가져오세요.</p>'
+      : "";
+  }
+  const messages: Record<
+    NonNullable<SkillsSnapshot["collection"]>["stoppedReason"],
+    string
+  > = {
+    cursor_exhausted: "",
+    item_limit:
+      "한 번에 가져올 수 있는 200개까지 저장했어요. 아직 가져오지 못한 스킬이 있을 수 있어요.",
+    byte_limit: "한 번에 보관할 수 있는 정보량에 도달해 여기까지 가져왔어요.",
+    time_limit: "조회 시간이 길어져 지금까지 가져온 목록을 저장했어요.",
+    page_limit: "이번 조회에서 읽을 수 있는 범위까지 가져왔어요.",
+    upstream_error:
+      "이후 목록을 가져오지 못해 확인된 스킬만 저장했어요. 잠시 후 다시 가져와 주세요.",
+    invalid_response: "이후 응답을 확인하지 못해 확인된 스킬만 저장했어요.",
+    cursor_cycle: "다음 목록이 반복되어 여기까지 가져왔어요.",
+    unknown_cursor: "다음 목록이 있는지 확인할 수 없어 여기까지 가져왔어요.",
+  };
+  const message = messages[skills.collection.stoppedReason];
+  return message ? `<p class="snapshot-note">${message}</p>` : "";
+}
+
+function skillList(
+  skills: SkillsSnapshot,
+  requestedCount = SKILLS_PER_VIEW,
+): string {
+  const limit =
+    Number.isInteger(requestedCount) &&
+    requestedCount >= SKILLS_PER_VIEW &&
+    requestedCount <= 200 &&
+    requestedCount % SKILLS_PER_VIEW === 0
+      ? requestedCount
+      : SKILLS_PER_VIEW;
+  const visible = skills.items.slice(0, limit);
+  const remaining = skills.items.length - visible.length;
+  return `<p class="snapshot-note">가져온 ${skills.items.length}개 중 ${visible.length}개 표시</p>
+    ${collectionNotice(skills)}
+    ${visible.length === 0 ? '<p class="empty-state">이번 조회에서 표시할 스킬이 없어요.</p>' : `<ul class="skill-list">${visible.map(skillCard).join("")}</ul>`}
+    ${remaining > 0 ? `<div class="skills-more"><a class="button secondary" href="/skills?shown=${limit + SKILLS_PER_VIEW}#skill-${visible.length + 1}">${Math.min(SKILLS_PER_VIEW, remaining)}개 더 보기 <span aria-hidden="true">↓</span></a><p class="fine">가져온 목록을 펼칩니다. 다시 동의할 필요 없이 현재 프로젝트 선택도 유지돼요.</p></div>` : visible.length > 0 ? '<p class="list-complete">가져온 목록을 모두 표시했어요.</p>' : ""}`;
 }
 
 function skillsPanel(model: HomeViewModel): string {
@@ -225,14 +273,12 @@ function skillsPanel(model: HomeViewModel): string {
         ? `<p class="subtle">조회 시점의 정보입니다. 출처와 검증 정보는 미지 API가 제공한 값을 그대로 구분해 표시합니다.</p>
       <p class="fine">조회 시각 · UTC · <time datetime="${escape(skills.fetchedAt)}">${escape(skills.fetchedAt)}</time></p>
       ${partialNotice(skills.partial)}
-      <p class="snapshot-note">조회한 결과 중 최대 20개 미리보기 · 현재 ${skills.items.length}개 표시${skills.truncated ? ". 이번 응답에 더 많은 항목이 있어 일부만 표시합니다." : "."}</p>
-      ${skills.hasMore === true ? '<p class="fine">API가 후속 결과가 있음을 알렸습니다. 이 데모는 이번 조회의 미리보기만 제공합니다.</p>' : ""}
-      ${skills.items.length === 0 ? '<p class="empty-state">이번 조회에서 표시할 스킬이 없어요.</p>' : `<ul class="skill-list">${skills.items.map(skillCard).join("")}</ul>`}`
+      ${skillList(skills, model.skillsVisibleCount)}`
         : `<p class="subtle">프로필·스킬 읽기에 동의하면 내 정보와 스킬 목록을 함께 가져옵니다. 이 단계를 건너뛰어도 로그인은 완료된 상태예요.</p>${reason ? `<p class="inline-error" role="alert">${escape(SKILL_ERROR_MESSAGES[reason])}</p>` : ""}`
     }
     <form class="${skills ? "refresh-form" : "login-form"}" action="/connect-skills" method="post"><button class="button ${skills ? "secondary" : "primary"}" type="submit">${skills ? "스킬 다시 가져오기" : "내 스킬 가져오기"}</button></form>
-    <p class="fine">소개·관심 분야 등 내 정보도 함께 새로 가져오며, 현재 프로젝트 선택은 초기화됩니다.</p>
-    <details class="developer-note"><summary>조회 범위와 검증 정보 읽는 법</summary><p><code>user:profile</code>과 <code>user:skills</code> 권한으로 서버가 <code>GET /v1/me</code>, <code>GET /v1/me/profile</code>, <code>GET /v1/me/skills?limit=20</code>을 호출합니다.</p><p>검증 방법·주체·시각은 API가 제공한 정보이며, 이 데모의 별도 검증이나 추천을 뜻하지 않습니다. 검증 시각이 없으면 조회 시각으로 대신하지 않습니다. API의 페이지 안내만으로 전체 스킬을 모두 가져왔다고 판단하지 않습니다.</p>${skills ? `<dl class="data">${row("조회 대상 · 로그인 회원", skills.subject)}${row("API", skills.endpoint)}${row("이번 API 응답 항목 수", String(skills.returnedCount))}${row("후속 페이지 안내", skills.hasMore === null ? "정보 없음" : skills.hasMore ? "있음" : "없음")}</dl><p>조회 대상은 검증된 로그인 계정입니다. 개별 스킬의 소유자 정보는 이 API 응답에 포함되지 않습니다.</p>` : ""}</details>
+    <p class="fine">다시 가져오기는 새 인증 요청을 시작합니다. 소개·관심 분야 등 내 정보도 함께 새로 가져오며, 현재 프로젝트 선택은 초기화됩니다.</p>
+    <details class="developer-note"><summary>조회 범위와 검증 정보 읽는 법</summary><p><code>user:profile</code>과 <code>user:skills</code> 권한으로 서버가 <code>GET /v1/me</code>, <code>GET /v1/me/profile</code>, <code>GET /v1/me/skills?limit=20</code>을 호출합니다. 다음 커서가 있으면 이어서 읽되 최대 200개·10페이지·5초, 보관할 스킬 정보 192KiB 한도에서 멈춥니다.</p><p>인증할 때 가져온 목록을 데모 세션에 보관하고 토큰은 폐기합니다. ‘더 보기’는 저장된 목록을 20개씩 펼치며 API를 다시 호출하거나 세션 만료 시각을 연장하지 않습니다.</p><p>검증 방법·주체·시각은 API가 제공한 정보이며, 이 데모의 별도 검증이나 추천을 뜻하지 않습니다. 검증 시각이 없으면 조회 시각으로 대신하지 않습니다. 마지막 API 응답의 페이지 안내만으로 전체 스킬을 모두 가져왔다고 판단하지 않습니다.</p>${skills ? `<dl class="data">${row("조회 대상 · 로그인 회원", skills.subject)}${row("API", skills.endpoint)}${row("읽은 API 응답 항목 수 · 중복 포함", String(skills.returnedCount))}${row("마지막 응답의 후속 페이지 안내", skills.hasMore === null ? "정보 없음" : skills.hasMore ? "있음" : "없음")}${skills.collection ? `${row("수집 시작 시각 · UTC", skills.collection.startedAt)}${row("읽은 API 페이지 수", String(skills.collection.pages))}${row("중복으로 제외한 항목 수", String(skills.collection.duplicateCount))}${row("수집 종료 이유", skills.collection.stoppedReason)}` : ""}</dl><p>조회 대상은 검증된 로그인 계정입니다. 개별 스킬의 소유자 정보는 이 API 응답에 포함되지 않습니다.</p>` : ""}</details>
   </section>`;
 }
 

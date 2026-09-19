@@ -667,7 +667,7 @@ describe("server-rendered OIDC demo", () => {
     expect(html).not.toContain("TypeScript");
   });
 
-  it("labels truncation separately from server pagination and does not promise a complete list", () => {
+  it("asks legacy clipped snapshots to refresh without inventing a local next page", () => {
     const html = renderHome({
       ...verified,
       page: "skills",
@@ -683,11 +683,15 @@ describe("server-rendered OIDC demo", () => {
         truncated: true,
       },
     });
-    expect(html).toContain("조회한 결과 중 최대 20개 미리보기");
-    expect(html).toContain("현재 20개 표시");
-    expect(html).toContain("이번 응답에 더 많은 항목이 있어 일부만 표시합니다");
-    expect(html).toContain("후속 페이지 안내</dt><dd><code>없음");
-    expect(html).toContain("이번 API 응답 항목 수</dt><dd><code>31");
+    expect(html).toContain("가져온 20개 중 20개 표시");
+    expect(html).toContain(
+      "이전에 저장한 목록입니다. 나머지를 보려면 한 번 다시 가져오세요",
+    );
+    expect(html).toContain("마지막 응답의 후속 페이지 안내</dt><dd><code>없음");
+    expect(html).toContain(
+      "읽은 API 응답 항목 수 · 중복 포함</dt><dd><code>31",
+    );
+    expect(html).not.toContain('href="/skills?shown=');
     expect(html).not.toContain("전체 20개");
     expect(html).not.toContain("모든 스킬");
     const next = renderHome({
@@ -695,8 +699,176 @@ describe("server-rendered OIDC demo", () => {
       page: "skills",
       skillsApi: { ...skillsApi, hasMore: true },
     });
-    expect(next).toContain("API가 후속 결과가 있음을 알렸습니다");
-    expect(next).not.toContain("다음 페이지</a>");
+    expect(next).toContain("이전에 저장한 목록입니다");
+    expect(next).toContain('action="/connect-skills" method="post"');
+    expect(next).not.toContain('href="/skills?shown=');
+    expect(
+      renderHome({ ...verified, page: "skills", skillsApi }),
+    ).not.toContain("이전에 저장한 목록입니다");
+  });
+
+  function collectedSkills(count: number): typeof skillsApi {
+    return {
+      ...skillsApi,
+      items: Array.from({ length: count }, (_, index) => ({
+        ...skillsApi.items[0]!,
+        id: `source_${index + 1}`,
+        name: `Skill ${index + 1}`,
+      })),
+      returnedCount: count,
+      collection: {
+        pages: Math.max(1, Math.ceil(count / 20)),
+        startedAt: "2026-09-19T00:02:58.000Z",
+        stoppedReason: "cursor_exhausted",
+        duplicateCount: 0,
+      },
+    };
+  }
+
+  it("opens saved skills 20 at a time and anchors the new rows without starting another consent", () => {
+    const snapshot = collectedSkills(45);
+    const first = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: snapshot,
+      projectGoal: "assistant",
+    });
+    expect(first).toContain("가져온 45개 중 20개 표시");
+    expect(first.match(/<li class="skill-item"/g)).toHaveLength(20);
+    expect(first).toContain('id="skill-20"');
+    expect(first).not.toContain('id="skill-21"');
+    expect(first).toContain('href="/skills?shown=40#skill-21">20개 더 보기');
+    expect(first).toContain(
+      "다시 동의할 필요 없이 현재 프로젝트 선택도 유지돼요",
+    );
+    expect(first).not.toContain("가져온 목록을 모두 표시했어요");
+    expect(first).not.toMatch(/<script|onclick=/);
+    const second = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: snapshot,
+      skillsVisibleCount: 40,
+    });
+    expect(second).toContain("가져온 45개 중 40개 표시");
+    expect(second.match(/<li class="skill-item"/g)).toHaveLength(40);
+    expect(second).toContain('id="skill-1"');
+    expect(second).toContain('id="skill-21"');
+    expect(second).not.toContain('id="skill-41"');
+    expect(second).toContain('href="/skills?shown=60#skill-41">5개 더 보기');
+    const last = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: snapshot,
+      skillsVisibleCount: 60,
+    });
+    expect(last).toContain("가져온 45개 중 45개 표시");
+    expect(last.match(/<li class="skill-item"/g)).toHaveLength(45);
+    expect(last).toContain('id="skill-41"');
+    expect(last).toContain("가져온 목록을 모두 표시했어요");
+    expect(last).not.toContain('href="/skills?shown=');
+    expect(last).toContain("다시 가져오기는 새 인증 요청을 시작합니다");
+    expect(snapshot.items).toHaveLength(45);
+  });
+
+  it("bases local expansion on saved items even when the API has no next cursor", () => {
+    const snapshot = collectedSkills(200);
+    snapshot.collection!.stoppedReason = "item_limit";
+    snapshot.truncated = true;
+    snapshot.hasMore = false;
+    const first = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: snapshot,
+    });
+    expect(first).toContain('href="/skills?shown=40#skill-21"');
+    expect(first).toContain("200개까지 저장했어요");
+    const last = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: snapshot,
+      skillsVisibleCount: 200,
+    });
+    expect(last).toContain("가져온 200개 중 200개 표시");
+    expect(last).toContain('id="skill-200"');
+    expect(last).toContain("가져온 목록을 모두 표시했어요");
+    expect(last).not.toContain('href="/skills?shown=');
+    expect(last).not.toContain("모든 스킬");
+    expect(last).toContain("아직 가져오지 못한 스킬이 있을 수 있어요");
+  });
+
+  it.each([
+    ["byte_limit", "보관할 수 있는 정보량에 도달해"],
+    ["time_limit", "조회 시간이 길어져"],
+    ["page_limit", "이번 조회에서 읽을 수 있는 범위까지"],
+    ["upstream_error", "이후 목록을 가져오지 못해"],
+    ["invalid_response", "이후 응답을 확인하지 못해"],
+    ["cursor_cycle", "다음 목록이 반복되어"],
+    ["unknown_cursor", "다음 목록이 있는지 확인할 수 없어"],
+  ] as const)(
+    "explains a %s collection stop while still offering saved rows",
+    (stoppedReason, explanation) => {
+      const snapshot = collectedSkills(25);
+      snapshot.collection!.stoppedReason = stoppedReason;
+      snapshot.truncated = true;
+      snapshot.hasMore = true;
+      const html = renderHome({
+        ...verified,
+        page: "skills",
+        skillsApi: snapshot,
+      });
+      expect(html).toContain(explanation);
+      expect(html).toContain("가져온 25개 중 20개 표시");
+      expect(html).toContain('href="/skills?shown=40#skill-21">5개 더 보기');
+      expect(html).toContain(`수집 종료 이유</dt><dd><code>${stoppedReason}`);
+      expect(html).not.toContain("이전에 저장한 목록입니다");
+    },
+  );
+
+  it("reports collection provenance separately from the saved unique item count", () => {
+    const snapshot = collectedSkills(21);
+    snapshot.returnedCount = 23;
+    snapshot.collection!.duplicateCount = 2;
+    const html = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: snapshot,
+    });
+    expect(html).toContain("가져온 21개 중 20개 표시");
+    expect(html).toContain(
+      "읽은 API 응답 항목 수 · 중복 포함</dt><dd><code>23",
+    );
+    expect(html).toContain("중복으로 제외한 항목 수</dt><dd><code>2");
+    expect(html).toContain("읽은 API 페이지 수</dt><dd><code>2");
+    expect(html).toContain("192KiB");
+    expect(html).toContain("토큰은 폐기합니다");
+    expect(html).toContain(
+      "API를 다시 호출하거나 세션 만료 시각을 연장하지 않습니다",
+    );
+  });
+
+  it("keeps later rows out of the first response and escapes them when expanded", () => {
+    const snapshot = collectedSkills(21);
+    snapshot.items[20] = {
+      ...snapshot.items[20]!,
+      name: "<script>later-row</script>",
+      id: '" onload="bad',
+    };
+    const first = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: snapshot,
+    });
+    expect(first).not.toContain("later-row");
+    const expanded = renderHome({
+      ...verified,
+      page: "skills",
+      skillsApi: snapshot,
+      skillsVisibleCount: 40,
+    });
+    expect(expanded).toContain('id="skill-21"');
+    expect(expanded).toContain("&lt;script&gt;later-row&lt;/script&gt;");
+    expect(expanded).toContain("&quot; onload=&quot;bad");
+    expect(expanded).not.toMatch(/<script| onload="/);
   });
 
   it("hides skills for another subject even if other session API results succeeded", () => {
