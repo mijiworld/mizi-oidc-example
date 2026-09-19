@@ -44,12 +44,14 @@ export async function readMemberApi(
 
   let body: unknown;
   try { body = await response.json(); } catch { return failure('invalid_response'); }
-  const parsed = profileSchema.safeParse(body);
-  if (!parsed.success) return failure('invalid_response');
-  if (parsed.data.id !== expectedSubject) {
+  const owner = z.object({ id: z.string().min(1).max(255) }).safeParse(body);
+  if (!owner.success) return failure('invalid_response');
+  if (owner.data.id !== expectedSubject) {
     // A different account is an identity-boundary failure, not optional API unavailability.
     throw new LoginFailure('member_api');
   }
+  const parsed = profileSchema.safeParse(body);
+  if (!parsed.success) return failure('invalid_response');
   return {
     status: 'success', fetchedAt: new Date().toISOString(),
     profile: { id: parsed.data.id, nickname: parsed.data.nickname, githubConnected: parsed.data.github_connected ?? null },

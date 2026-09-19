@@ -54,7 +54,11 @@ export const skillsCollectionSchema = z.object({
   stoppedReason: z.enum(['cursor_exhausted', 'item_limit', 'byte_limit', 'time_limit', 'page_limit',
     'upstream_error', 'invalid_response', 'cursor_cycle', 'unknown_cursor']),
   duplicateCount: z.number().int().nonnegative(),
-});
+  // A later page may fail authorization after earlier pages were confirmed.
+  // Preserve the prefix, but callers must discard the server-private API grant.
+  authorizationFailure: z.enum(['unauthorized', 'forbidden']).optional(),
+}).refine((value) => !value.authorizationFailure || value.stoppedReason === 'upstream_error',
+  'Authorization failure requires an upstream error.');
 export type SkillsCollection = z.infer<typeof skillsCollectionSchema>;
 
 export const skillsApiResultSchema = z.discriminatedUnion('status', [

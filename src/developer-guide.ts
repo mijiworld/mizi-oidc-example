@@ -70,6 +70,7 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
         <tr><td><code>user:skills</code></td><td>내 스킬 API 읽기</td><td>미지 고유 범위</td></tr>
       </tbody></table></div>
       <p class="dg-note"><code>profile</code>과 <code>user:profile</code>은 다릅니다. <code>openid profile</code>로 로그인했다고 회원 API까지 허용된 것은 아닙니다.</p>
+      <p>한 번 연결한 뒤에는 <strong>다시 가져오기</strong>로 같은 화면의 정보만 새로 읽습니다. 미지 로그인 화면으로 이동하지 않으며 프로젝트 선택도 유지합니다. 연결이 없거나 만료된 경우에는 <strong>다시 연결하기</strong>를 직접 선택해 미지에서 권한을 확인합니다.</p>
       <details class="dg-detail"><summary>인가 요청과 코드 교환에 넣는 값</summary>
         <p>아래는 스킬까지 읽을 때의 주요 매개변수입니다. 실제 전송에는 URL 인코딩을 적용합니다. 첫 로그인에는 <code>openid profile</code>만 요청하고, 추가 API 권한은 사용자가 가져오기를 선택할 때 요청합니다.</p>
         ${code('인가 요청 매개변수 · URL 인코딩 전 설명용', `response_type=code\nclient_id=${model.clientId}\nredirect_uri=${callback}\nscope=openid profile user:profile user:skills\ncode_challenge=<S256으로 계산한 PKCE challenge>\ncode_challenge_method=S256\nstate=<브라우저에 결합한 일회용 state>\nnonce=<일회용 nonce>\n${resources.map((resource) => `resource=${resource}`).join('\n')}`)}
@@ -142,11 +143,14 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
       </tbody></table></div>
       <p>위 회원 API의 오류 응답은 <code>application/problem+json</code>이며 <code>type</code>, <code>title</code>, <code>status</code>, <code>code</code>, <code>trace_id</code> 등을 사용합니다. 예를 들어 <code>session_expired</code>는 만료·취소된 토큰, <code>consent_required</code>는 권한 부족 등에 사용됩니다. OIDC UserInfo의 <code>{ error, error_description }</code> 응답과 구분하세요.</p>
       <details class="dg-detail"><summary>이 데모에만 적용한 저장·조회 정책</summary>
-        <ul><li>토큰은 콜백의 로그인 검증과 선택한 API 조회가 끝나면 폐기합니다. 접근·ID·갱신 토큰 원문을 브라우저, 세션, 로그에 보관하지 않습니다.</li>
-          <li>데모 세션은 30분이며 조회 시점의 최소 요약을 저장합니다. OIDC 표준이 정한 세션 수명이 아닙니다.</li>
+        <ul><li>추가 API 권한을 허용하면 접근 토큰만 서버 전용 DynamoDB 필드에 보관합니다. 저장 시 암호화(SSE)를 사용하며 일반 세션 조회·화면 모델·브라우저·로그에 토큰 원문을 전달하지 않습니다. ID 토큰과 갱신 토큰은 보관하지 않습니다.</li>
+          <li>데모 세션은 30분이며 조회 시점의 최소 요약을 저장합니다. 현재 미지 접근 토큰 응답의 <code>expires_in</code>은 3600초이지만, 데모는 실제 토큰 만료와 30분 세션 만료 중 이른 시각까지만 사용합니다. 이는 OIDC 표준이 정한 세션 수명이 아닙니다.</li>
+          <li><code>POST /refresh-profile</code>은 회원 기본 정보와 소개를, <code>POST /refresh-skills</code>는 스킬 목록만 갱신합니다. 다른 화면의 조회 결과와 프로젝트 선택, 세션 ID·만료 시각은 바꾸지 않습니다. 요청의 Origin과 세션, 저장된 권한·대상 API를 서버에서 확인합니다.</li>
+          <li>조회 실패 시 이전 결과와 조회 시각을 유지합니다. 프로필의 일부 API만 성공하면 해당 결과만 갱신하므로 각 시각을 확인하세요. 만료·권한 해제·401/403 등으로 연결을 사용할 수 없으면 접근 토큰을 제거하고 재연결을 안내합니다. 자동 OAuth 이동이나 갱신 토큰을 통한 자동 갱신은 구현하지 않습니다.</li>
           <li>스킬은 최대 200개 고유 ID, 저장 요약 192 KiB, 10페이지, 5초 중 먼저 도달한 한도까지 모읍니다. 원본 응답은 페이지당 256 KiB·누적 1 MiB이며 공통 API 시간 예산도 적용합니다.</li>
           <li>후속 페이지에서 실패하면 앞서 확인한 목록과 중단 사유를 남깁니다. 같은 ID는 첫 정보를 유지합니다. 저장된 목록을 모두 펼쳤다는 것과 모든 원천 스킬을 수집했다는 것은 별개입니다.</li>
-          <li>더 보기는 세션·만료 시각·프로젝트 선택을 바꾸지 않습니다. 다시 가져오기가 성공하면 새 세션과 새 조회 결과로 교체하고 이전 프로젝트 선택을 초기화합니다. 거절·로그인 검증 실패 시 기존 세션은 유지됩니다.</li>
+          <li>더 보기는 저장된 목록만 펼칩니다. 예전 세션처럼 재조회 연결이 없으면 한 번 명시적으로 다시 연결해야 합니다. 재연결은 새 인증·동의 흐름이며, 같은 회원으로 기본 회원 조회까지 성공하면 유효한 기존 세션의 프로젝트 선택을 이어갑니다. 다른 계정에는 이전 정보나 목표를 넘기지 않습니다. 거절·로그인 검증 실패 시 기존 세션은 유지됩니다.</li>
+          <li>로그아웃이나 계정 교체 시 이전 서버 세션과 접근 토큰을 삭제합니다. DynamoDB의 TTL 삭제는 지연될 수 있지만, 앱은 세션·토큰의 만료를 매 요청에서 검사해 만료된 연결을 즉시 사용할 수 없게 합니다.</li>
           <li>미지에서 연결을 해제해도 이미 저장된 요약은 데모 세션에 남을 수 있습니다. 즉시 지우려면 데모에서도 로그아웃하세요. 데모 로그아웃은 미지의 로그인 상태까지 종료하지 않습니다.</li></ul>
       </details>
     </section>
@@ -158,6 +162,8 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
         <a href="${SOURCE}/blob/main/src/oidc.ts" target="_blank" rel="noreferrer"><strong>src/oidc.ts ↗</strong><span>Discovery · PKCE · ID 토큰 · UserInfo 검증</span></a>
         <a href="${SOURCE}/blob/main/src/member-api.ts" target="_blank" rel="noreferrer"><strong>src/member-api.ts ↗</strong><span>회원 API 호출 · 최소 필드 추출 · 주체 대조</span></a>
         <a href="${SOURCE}/blob/main/src/extra-api.ts" target="_blank" rel="noreferrer"><strong>src/extra-api.ts ↗</strong><span>소개와 스킬 · cursor 수집 · 실패와 한도</span></a>
+        <a href="${SOURCE}/blob/main/src/api-grant.ts" target="_blank" rel="noreferrer"><strong>src/api-grant.ts ↗</strong><span>서버 전용 접근 토큰 · 범위·대상·만료 스키마</span></a>
+        <a href="${SOURCE}/blob/main/src/api-refresh.ts" target="_blank" rel="noreferrer"><strong>src/api-refresh.ts ↗</strong><span>OAuth 이동 없는 API 재조회 · 고정 경로와 시간 제한</span></a>
         <a href="${SOURCE}/blob/main/src/store.ts" target="_blank" rel="noreferrer"><strong>src/store.ts ↗</strong><span>일회용 요청 · 회원에 묶인 세션 스키마</span></a>
       </div>
       <p>${link(GUIDE, '미지 인증 서버 연동 가이드')} · ${link('https://openid.net/specs/openid-connect-core-1_0.html', 'OpenID Connect Core')} · ${link('https://www.rfc-editor.org/rfc/rfc7636', 'PKCE · RFC 7636')} · ${link('https://www.rfc-editor.org/rfc/rfc6750', 'Bearer · RFC 6750')} · ${link('https://www.rfc-editor.org/rfc/rfc8707', 'Resource Indicators · RFC 8707')}</p>

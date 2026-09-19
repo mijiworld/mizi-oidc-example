@@ -79,6 +79,7 @@ describe('optional member API projection', () => {
       name: 'LoginFailure', stage: 'member_api',
     });
     await expect(read(reply({ ...profile, id: 'usr_another' }))).rejects.toBeInstanceOf(LoginFailure);
+    await expect(read(reply({ id: 'usr_another', nickname: false }))).rejects.toBeInstanceOf(LoginFailure);
   });
   it('derives the resource from the issuer origin and never permits insecure transport', async () => {
     expect(memberApiResource(`${issuer}/tenant`)).toBe(`${issuer}/v1/me`);

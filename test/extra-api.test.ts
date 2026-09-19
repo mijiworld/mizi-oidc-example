@@ -305,7 +305,11 @@ describe('bounded skills pagination', () => {
     const result = await readSkillsApi(issuer, token, scopes, subject, fetcher);
     expect(result).toMatchObject({ status: 'success', returnedCount: 1, hasMore: true, truncated: true,
       collection: { pages: 1, stoppedReason: 'upstream_error' } });
-    if (result.status === 'success') expect(result.items).toHaveLength(1);
+    if (result.status === 'success') {
+      expect(result.items).toHaveLength(1);
+      expect(result.collection?.authorizationFailure).toBe(status === 401 ? 'unauthorized' : status === 403 ? 'forbidden' : undefined);
+      expect(skillsApiResultSchema.safeParse(result).success).toBe(true);
+    }
     expect(JSON.stringify(result)).not.toContain(token);
     expect(JSON.stringify(result)).not.toContain('private-cursor');
   });

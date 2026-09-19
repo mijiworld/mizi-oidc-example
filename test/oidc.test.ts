@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from 'jose';
 import { loadConfig } from '../src/config.js';
 import { MiziOidcProvider } from '../src/oidc.js';
 import { digest, type Attempt } from '../src/store.js';
+import { apiGrantSchema } from '../src/api-grant.js';
 
 const issuer = 'https://issuer.example';
 const clientId = 'https://demo.example/client.json';
@@ -12,13 +13,14 @@ const attempt: Attempt = {
   state: 's'.repeat(43), nonce: 'n'.repeat(43), codeVerifier: 'v'.repeat(43),
   bindingHash: digest('b'.repeat(43)), expiresAt: Math.floor(Date.now() / 1000) + 600,
 };
-const access = 'access-token-must-never-be-stored';
+const access = 'access-token-server-private-only';
 const refresh = 'refresh-token-must-never-be-stored';
 let keys: Awaited<ReturnType<typeof generateKeyPair>>;
 let wrongKeys: Awaited<ReturnType<typeof generateKeyPair>>;
 beforeAll(async () => {
   [keys, wrongKeys] = await Promise.all([generateKeyPair('RS256'), generateKeyPair('RS256')]);
 });
+afterEach(() => vi.useRealTimers());
 
 function callback(query: Record<string, string | undefined> = {}) {
   const result = new URL(settings.callbackUrl);
@@ -32,6 +34,8 @@ async function fixture(options: {
   discoveryIssuer?: string; tokenFailure?: boolean; tokenEndpoint?: string;
   tokenScope?: string | null; memberProfile?: unknown; memberStatus?: number; memberUnavailable?: boolean;
   detailsProfile?: unknown; skillsBody?: unknown;
+  expiresIn?: number | null; userInfoElapsed?: number;
+  laterSkillsStatus?: 401 | 403;
 } = {}) {
   const calls: { url: string; init?: RequestInit }[] = [];
   const jwk = await exportJWK(keys.publicKey);
@@ -64,10 +68,12 @@ async function fixture(options: {
       const idToken = await new SignJWT(payload).setProtectedHeader({ alg: options.algorithm ?? 'RS256', kid: 'test-rsa' })
         .sign(options.algorithm === 'HS256' ? randomBytes(32) : (options.wrongSignature ? wrongKeys : keys).privateKey);
       return Response.json({ access_token: access, refresh_token: refresh, token_type: 'Bearer',
-        expires_in: 3600, ...(options.tokenScope === null ? {} : { scope: options.tokenScope ?? 'openid profile' }),
+        ...(options.expiresIn === null ? {} : { expires_in: options.expiresIn ?? 3600 }),
+        ...(options.tokenScope === null ? {} : { scope: options.tokenScope ?? 'openid profile' }),
         ...(options.omitIdToken ? {} : { id_token: idToken }) });
     }
     if (url === `${issuer}/userinfo`) {
+      if (options.userInfoElapsed) vi.setSystemTime(Date.now() + options.userInfoElapsed);
       expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${access}`);
       return Response.json({ sub: options.profileSub ?? 'usr_verified', nickname: '검증한 회원', email: 'not-stored@example.test' });
     }
@@ -81,6 +87,9 @@ async function fixture(options: {
       user: { id: 'usr_verified', role: '개발자' }, bio: '작은 도구를 만들어요.', interests: ['웹'], partial: false,
       location: 'not-retained-location', contact_method: 'not-retained-contact',
     });
+    if (url.startsWith(`${issuer}/v1/me/skills?limit=20&cursor=`) && options.laterSkillsStatus) {
+      return Response.json({ error: 'not-retained-response' }, { status: options.laterSkillsStatus });
+    }
     if (url === `${issuer}/v1/me/skills?limit=20`) return Response.json(options.skillsBody ?? {
       items: [{ id: 'skill_1', name: 'TypeScript', source: 'github_analysis', visible: true,
         verification_method: 'github_analysis', verified_by: 'MiZi', verified_at: '2026-09-19T00:00:00.000Z',
@@ -116,7 +125,9 @@ describe('real OIDC library and independent RS256 verification', () => {
     expect(result.verification).toMatchObject({ issuer, audience: clientId, sub: 'usr_verified',
       signature: true, algorithm: 'RS256', nonce: true, pkce: 'S256', state: true,
       issuerResponse: true, userInfoSubject: true });
-    const serialized = JSON.stringify(result);
+    const { apiGrant, ...identity } = result;
+    expect(apiGrant).toBeUndefined();
+    const serialized = JSON.stringify(identity);
     for (const sensitive of [access, refresh, 'single-use-code', 'not-stored@example.test', 'id_token']) {
       expect(serialized).not.toContain(sensitive);
     }
@@ -145,7 +156,10 @@ describe('real OIDC library and independent RS256 verification', () => {
     ]);
     const tokenCall = f.calls.find((call) => call.url === `${issuer}/token`)!;
     expect(new URLSearchParams(String(tokenCall.init?.body)).getAll('resource')).toEqual([`${issuer}/v1/me`]);
-    const serialized = JSON.stringify(result);
+    const { apiGrant, ...identity } = result;
+    expect(apiGrant).toMatchObject({ accessToken: access, subject: 'usr_verified', scope: 'openid profile user:profile',
+      resources: [`${issuer}/v1/me`] });
+    const serialized = JSON.stringify(identity);
     for (const sensitive of [access, refresh, 'api-private@example.test', 'id_token', 'access_token', 'refresh_token']) {
       expect(serialized).not.toContain(sensitive);
     }
@@ -166,7 +180,9 @@ describe('real OIDC library and independent RS256 verification', () => {
     expect(result.memberApi).toMatchObject({ status: 'error', reason });
     expect(result.memberApi).not.toHaveProperty('profile');
     if (reason === 'scope_missing') expect(f.calls.some((call) => call.url.endsWith('/v1/me'))).toBe(false);
-    expect(JSON.stringify(result)).not.toContain(access);
+    const { apiGrant, ...identity } = result;
+    if (['scope_missing', 'unauthorized', 'forbidden'].includes(reason)) expect(apiGrant).toBeUndefined();
+    expect(JSON.stringify(identity)).not.toContain(access);
   });
 
   it('uses all requested API resources at both OAuth boundaries and returns minimal per-API snapshots', async () => {
@@ -183,7 +199,9 @@ describe('real OIDC library and independent RS256 verification', () => {
       profile: { role: '개발자', bio: '작은 도구를 만들어요.', interests: ['웹'] } });
     expect(result.skillsApi).toMatchObject({ status: 'success', subject: 'usr_verified',
       items: [{ name: 'TypeScript', source: 'github_analysis', verifiedBy: 'MiZi' }] });
-    const serialized = JSON.stringify(result);
+    const { apiGrant, ...identity } = result;
+    expect(apiGrant?.resources).toEqual(resources);
+    const serialized = JSON.stringify(identity);
     for (const sensitive of [access, refresh, 'not-retained-contact', 'not-retained-location']) expect(serialized).not.toContain(sensitive);
   });
 
@@ -195,6 +213,63 @@ describe('real OIDC library and independent RS256 verification', () => {
     expect(result.profileDetails?.status).toBe('success');
     expect(result.skillsApi).toMatchObject({ status: 'error', reason: 'scope_missing' });
     expect(f.calls.some((call) => call.url.includes('/me/skills'))).toBe(false);
+    expect(result.apiGrant?.scope).toBe('openid profile user:profile');
+  });
+
+  it.each([[401, 'unauthorized'], [403, 'forbidden']] as const)('keeps initial verified skills but does not retain a grant denied on a later page (%s)', async (laterSkillsStatus, authorizationFailure) => {
+    const f = await fixture({ tokenScope: 'openid profile user:profile user:skills', laterSkillsStatus,
+      skillsBody: { items: [{ id: 'skl_first', name: 'TypeScript', source: 'github_analysis' }], next_cursor: 'private-cursor' } });
+    const result = await f.provider.complete(callback(), { ...attempt, readMemberApi: true, readProfileDetails: true, readSkillsApi: true });
+    expect(result.apiGrant).toBeUndefined();
+    expect(result.skillsApi).toMatchObject({ status: 'success', items: [{ id: 'skl_first' }],
+      collection: { pages: 1, stoppedReason: 'upstream_error', authorizationFailure } });
+    expect(result.verification.signature).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(access);
+    expect(JSON.stringify(result)).not.toContain('private-cursor');
+  });
+
+  it.each([[3600, 1800], [45, 45]] as const)('bounds a private API grant from expires_in=%s to %s seconds after token receipt', async (expiresIn, expected) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const receivedAt = Math.floor(Date.now() / 1000);
+    const f = await fixture({ tokenScope: 'openid profile user:profile', expiresIn, userInfoElapsed: 10000 });
+    const result = await f.provider.complete(callback(), { ...attempt, readMemberApi: true, readProfileDetails: true });
+    expect(result.apiGrant?.expiresAt).toBe(receivedAt + expected);
+    expect(apiGrantSchema.safeParse(result.apiGrant).success).toBe(true);
+    expect(Object.keys(result.apiGrant!).sort()).toEqual(['accessToken', 'clientId', 'expiresAt', 'issuer', 'resources', 'scope', 'subject']);
+    expect(JSON.stringify(result)).not.toContain(refresh);
+    expect(JSON.stringify(result)).not.toContain('id_token');
+  });
+
+  it.each([null, 0])('does not retain credentials without a positive explicit expiry (%s)', async (expiresIn) => {
+    const f = await fixture({ tokenScope: 'openid profile user:profile', expiresIn });
+    const result = await f.provider.complete(callback(), { ...attempt, readMemberApi: true });
+    expect(result.apiGrant).toBeUndefined();
+    expect(result.verification.signature).toBe(true);
+  });
+
+  it('does not retain a grant already expired during verification or unsolicited API permissions', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const expired = await fixture({ tokenScope: 'openid profile user:profile', expiresIn: 1, userInfoElapsed: 2000 });
+    expect((await expired.provider.complete(callback(), { ...attempt, readMemberApi: true })).apiGrant).toBeUndefined();
+    const unsolicited = await fixture({ tokenScope: 'openid profile user:profile user:skills' });
+    expect((await unsolicited.provider.complete(callback(), attempt)).apiGrant).toBeUndefined();
+  });
+
+  it('reuses the server-private grant without discovery, token exchange, UserInfo or another authorization request', async () => {
+    const f = await fixture({ tokenScope: 'openid profile user:profile user:skills' });
+    const signedIn = await f.provider.complete(callback(), {
+      ...attempt, readMemberApi: true, readProfileDetails: true, readSkillsApi: true,
+    });
+    f.calls.length = 0;
+    const updated = await f.provider.readApis(signedIn.apiGrant!, 'profile');
+    expect(f.calls.map((call) => call.url).sort()).toEqual([`${issuer}/v1/me`, `${issuer}/v1/me/profile`]);
+    expect(updated.memberApi?.status).toBe('success');
+    expect(updated.profileDetails?.status).toBe('success');
+    expect(updated.skillsApi).toBeUndefined();
+    expect(JSON.stringify(updated)).not.toContain(access);
+    f.calls.length = 0;
+    expect((await f.provider.readApis(signedIn.apiGrant!, 'skills')).skillsApi?.status).toBe('success');
+    expect(f.calls.map((call) => call.url)).toEqual([`${issuer}/v1/me/skills?limit=20`]);
   });
 
   it('rejects a profile-details identity mismatch even when the basic member response matches', async () => {

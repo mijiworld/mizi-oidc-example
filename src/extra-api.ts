@@ -160,13 +160,15 @@ export async function readSkillsApi(
   let duplicateCount = 0;
   let hasMore: boolean | null = null;
   let partial: boolean | null = false;
-  const finish = (stoppedReason: StopReason): Success => ({
+  const finish = (stoppedReason: StopReason, authorizationFailure?: SkillsCollection['authorizationFailure']): Success => ({
     ...snapshot(), status: 'success', partial, items, requestedLimit: SKILLS_PREVIEW_LIMIT,
     returnedCount, hasMore, truncated: stoppedReason !== 'cursor_exhausted',
-    collection: { pages, startedAt, stoppedReason, duplicateCount },
+    collection: { pages, startedAt, stoppedReason, duplicateCount,
+      ...(authorizationFailure ? { authorizationFailure } : {}) },
   });
   const fail = (reason: Reason, stop: StopReason): SkillsApiResult => pages
-    ? finish(stop) : { ...snapshot(), status: 'error', reason };
+    ? finish(stop, reason === 'unauthorized' || reason === 'forbidden' ? reason : undefined)
+    : { ...snapshot(), status: 'error', reason };
 
   for (;;) {
     if (signal.aborted) return fail('unavailable', 'time_limit');

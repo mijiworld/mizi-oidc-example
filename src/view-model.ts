@@ -40,6 +40,11 @@ export interface HomeViewModel {
   profileDetails?: ProfileDetailsResult;
   skillsApi?: SkillsApiResult;
   projectGoal?: ProjectGoal;
+  apiConnection?: {
+    profile: 'ready' | 'connect' | 'reconnect';
+    skills: 'ready' | 'connect' | 'reconnect';
+  };
+  refreshFeedback?: 'updated' | 'partial' | 'unavailable' | 'reconnect_required' | 'invalid_response';
   serviceError?: string;
   error?: string;
 }
