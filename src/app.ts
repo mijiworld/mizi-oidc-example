@@ -55,6 +55,14 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     token_endpoint_auth_method: 'none', grant_types: ['authorization_code'], response_types: ['code'],
     scope: 'openid profile user:profile user:skills',
   }));
+  // Public documentation never reads a member session or calls the provider.
+  app.get('/developers', (c) => {
+    c.header('Referrer-Policy', 'strict-origin');
+    return c.html(renderHome({
+      page: 'developers', issuer: config.issuer, clientId: config.clientId, baseUrl: config.baseUrl,
+      loginAction: '/login', logoutAction: '/logout', authenticated: false,
+    }));
+  });
   const pages = { '/': 'home', '/profile': 'profile', '/skills': 'skills', '/projects': 'projects' } as const;
   async function page(c: Context, name: NonNullable<HomeViewModel['page']>) {
     const cookie = getCookie(c, sessionCookie);

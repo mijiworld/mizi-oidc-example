@@ -42,6 +42,33 @@ beforeEach(() => { vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('browser session and callback boundaries', () => {
+  it('serves the public API guide without session storage, user data or provider calls', async () => {
+    const f = fixture();
+    const readSession = vi.spyOn(f.store, 'getSession').mockRejectedValue(new Error('storage unavailable'));
+    const secret = 'private-value-never-render';
+    for (const cookie of [undefined, `__Host-mizi_demo_session=${randomBytes(32).toString('base64url')}`]) {
+      const response = await f.app.request(`https://attacker.example/developers?access_token=${secret}`, {
+        headers: { ...(cookie ? { Cookie: cookie } : {}), 'X-Forwarded-Host': 'attacker.example' },
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.getSetCookie()).toHaveLength(0);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(response.headers.get('referrer-policy')).toBe('strict-origin');
+      expect(response.headers.get('content-security-policy')).toContain("script-src 'none'");
+      const html = await response.text();
+      expect(html).toContain('<title>개발자 API 가이드');
+      expect(html).toContain(`${issuer}/v1/me`);
+      expect(html).toContain(config.clientId);
+      expect(html).not.toContain('attacker.example');
+      expect(html).not.toContain(secret);
+      expect(html).not.toContain(identity.profile.sub);
+      expect(html).not.toMatch(/<form|<input|<script|<iframe/i);
+    }
+    expect(readSession).not.toHaveBeenCalled();
+    expect(f.provider.authorizationUrl).not.toHaveBeenCalled();
+    expect(f.provider.complete).not.toHaveBeenCalled();
+  });
+
   it('preserves home form origins while keeping redirects, callbacks and error responses no-referrer', async () => {
     const f = fixture();
     for (const path of ['/', '/?error=login_failed']) {

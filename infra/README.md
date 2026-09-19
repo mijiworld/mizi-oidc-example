@@ -58,9 +58,11 @@ CloudFormation 배포, `/health`의 배포 SHA 확인을 수행합니다. 같은
 ```bash
 curl --fail https://login-demo.example.com/health
 curl --fail https://login-demo.example.com/client.json
+curl --fail https://login-demo.example.com/developers
 ```
 
 브라우저에서 실제 로그인·동의를 완료한 뒤 로그인 결과를 확인하세요.
+개발자 API 가이드는 로그인 없이 열리며, 방문만으로 회원 API나 세션 저장소를 조회하지 않습니다.
 내 정보에서 소개·관심 분야를, 내 스킬에서 추가 동의 후 스킬 목록을 확인하세요.
 가져온 스킬이 20개를 넘으면 **더 보기**로 20개씩 펼치고 마지막 항목까지 확인하세요.
 이 동작은 저장된 목록만 표시하며 추가 동의나 프로젝트 선택 초기화가 없어야 합니다.

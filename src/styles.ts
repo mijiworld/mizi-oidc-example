@@ -27,6 +27,8 @@ button { cursor: pointer; }
 .brand strong { font-size: 22px; letter-spacing: -.05em; }
 .brand span { color: var(--muted); font-size: 13px; }
 .header-link { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.header-links { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px 20px; }
+.header-links [aria-current="page"] { color: var(--green); }
 .eyebrow { color: var(--green); font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 main { padding: 72px 0 48px; }
 .signed-in main { padding-top: 40px; }
@@ -136,6 +138,7 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 @media (max-width: 720px) {
   .wrap { width: calc(100% - 40px); }
   .header { padding: 20px 0; }
+  .header-links { gap: 6px 12px; }
   .brand { gap: 8px; }
   .brand span { font-size: 11px; }
   .header-link { font-size: 12px; }
