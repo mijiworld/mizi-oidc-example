@@ -28,6 +28,7 @@ afterEach(() => vi.restoreAllMocks());
 describe('server-only API grants', () => {
   it.each([
     { accessToken: 'bad\r\nAuthorization: injected' }, { accessToken: 'x'.repeat(2049) },
+    { refreshToken: 'bad\r\nAuthorization: injected' }, { refreshToken: 'x'.repeat(2049) },
     { scope: 'user:profile\nuser:skills' }, { scope: 'x'.repeat(2049) },
     { resources: [resources[0], resources[0]] }, { resources: ['http://insecure.example/v1/me'] },
     { resources: ['https://user:password@issuer.example/v1/me'] }, { subject: '' },
@@ -35,10 +36,11 @@ describe('server-only API grants', () => {
     expect(apiGrantSchema.safeParse({ ...grant(), ...patch }).success).toBe(false);
   });
 
-  it('drops unsolicited token fields from the persistence schema', () => {
+  it('retains only optional server-private refresh credentials and never an ID token', () => {
     const result = apiGrantSchema.parse({ ...grant(), idToken: 'private-id-token', refreshToken: 'private-refresh-token' });
     expect(result).not.toHaveProperty('idToken');
-    expect(result).not.toHaveProperty('refreshToken');
+    expect(result.refreshToken).toBe('private-refresh-token');
+    expect(apiGrantSchema.parse(grant())).not.toHaveProperty('refreshToken');
   });
 
   it.each([
@@ -60,7 +62,7 @@ describe('server-only API grants', () => {
 describe('API-only refresh boundaries', () => {
   it('reads only the two profile endpoints and returns no credentials or original sensitive fields', async () => {
     const fetcher = goodFetch();
-    const previous = grant();
+    const previous = { ...grant(), refreshToken: 'refresh-private-never-sent-to-apis' };
     const before = structuredClone(previous);
     const result = await refreshApis(settings, previous, 'profile', fetcher);
     expect(fetcher.mock.calls.map(([url]) => String(url)).sort()).toEqual(resources.slice(0, 2));
@@ -68,6 +70,11 @@ describe('API-only refresh boundaries', () => {
     expect(result.profileDetails).toMatchObject({ status: 'success', subject, profile: { bio: profile.bio } });
     expect(result.skillsApi).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain(token);
+    expect(JSON.stringify(result)).not.toContain(previous.refreshToken);
+    for (const [, init] of fetcher.mock.calls) {
+      expect(JSON.stringify({ headers: Object.fromEntries(new Headers(init?.headers)), body: init?.body }))
+        .not.toContain(previous.refreshToken);
+    }
     expect(previous).toEqual(before); // Neither reuse nor a successful read extends expiry.
   });
 

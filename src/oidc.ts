@@ -8,8 +8,9 @@ import type { Identity } from './view-model.js';
 import { LoginFailure, type LoginStage } from './login-error.js';
 import { memberApiResource, readMemberApi } from './member-api.js';
 import { profileDetailsResource, skillsApiResource, readProfileDetails, readSkillsApi } from './extra-api.js';
-import { API_GRANT_MAX_SECONDS, apiGrantSchema, type ApiGrant, type ApiRefreshPage, type ApiRefreshResult } from './api-grant.js';
-import { refreshApis } from './api-refresh.js';
+import { API_GRANT_MAX_SECONDS, ApiGrantRefreshFailure, apiGrantSchema, type ApiGrant, type ApiRefreshPage, type ApiRefreshResult } from './api-grant.js';
+import { refreshApis, validateApiGrant } from './api-refresh.js';
+import { SESSION_ABSOLUTE_SECONDS } from './session-policy.js';
 
 export type OidcIdentity = Identity & { apiGrant?: ApiGrant };
 
@@ -17,6 +18,7 @@ export interface OidcProvider {
   authorizationUrl(attempt: Attempt): Promise<string>;
   complete(callback: URL, attempt: Attempt): Promise<OidcIdentity>;
   readApis?(grant: ApiGrant, page: ApiRefreshPage): Promise<ApiRefreshResult>;
+  refreshGrant?(grant: ApiGrant): Promise<ApiGrant>;
 }
 
 const claimsSchema = z.object({
@@ -31,6 +33,21 @@ const equal = (a: string, b: string): boolean => {
   const right = Buffer.from(b);
   return left.length === right.length && timingSafeEqual(left, right);
 };
+
+/** Bound parsing as well as fetch, including a stalled provider response body. */
+function withinRefreshBudget<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const expired = () => reject(new ApiGrantRefreshFailure('ambiguous'));
+    if (signal.aborted) { operation.catch(() => undefined); expired(); return; }
+    signal.addEventListener('abort', expired, { once: true });
+    operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', expired));
+  });
+}
+const supportedScopes = new Set(['openid', 'profile', 'user:profile', 'user:skills']);
+const hasApiScope = (scope: string[], resources: string[], issuer: string): boolean =>
+  (scope.includes('user:profile') && resources.some((resource) =>
+    [memberApiResource(issuer), profileDetailsResource(issuer)].includes(resource))) ||
+  (scope.includes('user:skills') && resources.includes(skillsApiResource(issuer)));
 
 /** Use the same fixed resource list at authorization and code exchange. */
 function apiResources(issuer: string, attempt: Attempt): string[] {
@@ -102,6 +119,7 @@ export class MiziOidcProvider implements OidcProvider {
       state: attempt.state, nonce: attempt.nonce,
       code_challenge: await client.calculatePKCECodeChallenge(attempt.codeVerifier),
       code_challenge_method: 'S256',
+      max_age: String(SESSION_ABSOLUTE_SECONDS),
     });
     for (const resource of apiResources(this.settings.issuer, attempt)) parameters.append('resource', resource);
     return client.buildAuthorizationUrl(configuration, parameters).href;
@@ -109,6 +127,91 @@ export class MiziOidcProvider implements OidcProvider {
 
   async readApis(grant: ApiGrant, page: ApiRefreshPage): Promise<ApiRefreshResult> {
     return refreshApis(this.settings, grant, page, this.fetcher);
+  }
+
+  /** The store must lease/CAS this operation: a refresh token rotates on every use. */
+  async refreshGrant(input: ApiGrant): Promise<ApiGrant> {
+    const startedAt = Date.now();
+    let grant: ApiGrant;
+    try { grant = validateApiGrant(this.settings, input); }
+    catch { throw new ApiGrantRefreshFailure('invalid_grant'); }
+    const previousScopes = grant.scope.split(' ');
+    if (!grant.refreshToken || !previousScopes.includes('openid') ||
+        previousScopes.some((scope) => !supportedScopes.has(scope)) ||
+        !hasApiScope(previousScopes, grant.resources, this.settings.issuer)) {
+      throw new ApiGrantRefreshFailure('invalid_grant');
+    }
+    let discovered: client.Configuration;
+    try { discovered = await this.configuration(); }
+    catch { throw new ApiGrantRefreshFailure('unavailable'); }
+
+    // Do not mutate the shared discovery configuration: each concurrent user has
+    // an independent deadline and rotation outcome. Endpoints remain pinned.
+    const configuration = new client.Configuration(discovered.serverMetadata(), this.settings.clientId,
+      { id_token_signed_response_alg: 'RS256' }, client.None());
+    configuration.timeout = 5;
+    const metadata = configuration.serverMetadata();
+    const signal = AbortSignal.timeout(Math.max(0, 10000 - (Date.now() - startedAt)));
+    let tokenSent = false;
+    let tokenStatus: number | undefined;
+    let userInfoStatus: number | undefined;
+    let phase: 'token' | 'userinfo' = 'token';
+    configuration[client.customFetch] = async (url, options) => {
+      if (![metadata.token_endpoint, metadata.userinfo_endpoint].includes(url)) {
+        throw new ApiGrantRefreshFailure('invalid_response');
+      }
+      if (url === metadata.token_endpoint) {
+        if (tokenSent) throw new ApiGrantRefreshFailure('ambiguous');
+        tokenSent = true;
+      }
+      const response = await this.fetcher(url, { ...options,
+        body: options.body instanceof Uint8Array ? new Uint8Array(options.body) : options.body,
+        cache: 'no-store', signal: AbortSignal.any([signal, ...(options.signal ? [options.signal] : [])]),
+      });
+      if (url === metadata.token_endpoint) tokenStatus = response.status;
+      else userInfoStatus = response.status;
+      return response;
+    };
+    try {
+      const parameters = new URLSearchParams({ scope: grant.scope });
+      for (const resource of grant.resources) parameters.append('resource', resource);
+      const tokens = await withinRefreshBudget(
+        client.refreshTokenGrant(configuration, grant.refreshToken, parameters), signal);
+      const tokenReceivedAt = Math.floor(Date.now() / 1000);
+      const scopes = typeof tokens.scope === 'string' ? tokens.scope.split(' ') : [];
+      if (tokens.token_type.toLowerCase() !== 'bearer' || !Number.isSafeInteger(tokens.expires_in) ||
+          tokens.expires_in! < 1 || !scopes.includes('openid') ||
+          scopes.some((scope) => !previousScopes.includes(scope)) ||
+          !hasApiScope(scopes, grant.resources, this.settings.issuer) ||
+          !tokens.refresh_token || tokens.refresh_token === grant.refreshToken || tokens.id_token !== undefined) {
+        throw new ApiGrantRefreshFailure('invalid_response');
+      }
+      const renewed = apiGrantSchema.safeParse({ ...grant, accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token, scope: tokens.scope,
+        expiresAt: tokenReceivedAt + Math.min(tokens.expires_in!, API_GRANT_MAX_SECONDS) });
+      if (!renewed.success) throw new ApiGrantRefreshFailure('invalid_response');
+      phase = 'userinfo';
+      const profile = profileSchema.parse(await withinRefreshBudget(
+        client.fetchUserInfo(configuration, renewed.data.accessToken, grant.subject), signal));
+      if (profile.sub !== grant.subject || renewed.data.expiresAt <= Math.floor(Date.now() / 1000)) {
+        throw new ApiGrantRefreshFailure('invalid_response');
+      }
+      return renewed.data;
+    } catch (error) {
+      if (error instanceof ApiGrantRefreshFailure) throw error;
+      const status = phase === 'token' ? tokenStatus : userInfoStatus;
+      // Only a pre-exchange failure or explicit token-endpoint throttle is safe
+      // to retry with the old refresh token. Even a 5xx may hide a rotation.
+      if (!tokenSent || (phase === 'token' && status === 429)) {
+        throw new ApiGrantRefreshFailure('unavailable');
+      }
+      if (status === undefined || status >= 500) throw new ApiGrantRefreshFailure('ambiguous');
+      if (status === 401 || status === 403 ||
+          (error instanceof client.ResponseBodyError && error.error === 'invalid_grant')) {
+        throw new ApiGrantRefreshFailure('invalid_grant');
+      }
+      throw new ApiGrantRefreshFailure('invalid_response');
+    }
   }
 
   async complete(callback: URL, attempt: Attempt): Promise<OidcIdentity> {
@@ -153,7 +256,8 @@ export class MiziOidcProvider implements OidcProvider {
         (Array.isArray(audience) && audience.length === 1 && audience[0] === this.settings.clientId);
       if (!onlyThisClient ||
           (verified.payload.azp !== undefined && verified.payload.azp !== this.settings.clientId) ||
-          claims.auth_time > now + 5 || !equal(claims.nonce, attempt.nonce)) {
+          claims.auth_time > now + 5 || claims.auth_time + SESSION_ABSOLUTE_SECONDS <= now ||
+          !equal(claims.nonce, attempt.nonce)) {
         throw new Error('Invalid identity binding.');
       }
       const accessTokenHash = createHash('sha256').update(tokens.access_token, 'ascii')
@@ -180,7 +284,7 @@ export class MiziOidcProvider implements OidcProvider {
 
       // Only explicitly granted API access may be retained in server-private storage.
       // The route must separate apiGrant before writing the public identity/session.
-      // ID and refresh tokens are never returned, even if the provider sends them.
+      // The refresh credential is private too; ID tokens are never retained.
       const scopes = tokens.scope?.split(' ') ?? [];
       const hasApiPermission = ((attempt.readMemberApi || attempt.readProfileDetails) && scopes.includes('user:profile')) ||
         (attempt.readSkillsApi && scopes.includes('user:skills'));
@@ -190,8 +294,13 @@ export class MiziOidcProvider implements OidcProvider {
         (skillsApi?.status === 'success' && Boolean(skillsApi.collection?.authorizationFailure));
       const expiresAt = typeof expiresIn === 'number' && Number.isFinite(expiresIn) && expiresIn >= 1
         ? tokenReceivedAt + Math.min(Math.floor(expiresIn), API_GRANT_MAX_SECONDS) : 0;
-      const grant = hasApiPermission && !denied && expiresAt > Math.floor(Date.now() / 1000)
+      const requestedScopes = ['openid', 'profile',
+        ...(attempt.readMemberApi || attempt.readProfileDetails ? ['user:profile'] : []),
+        ...(attempt.readSkillsApi ? ['user:skills'] : [])];
+      const grant = hasApiPermission && scopes.every((scope) => requestedScopes.includes(scope)) &&
+        !denied && expiresAt > Math.floor(Date.now() / 1000)
         ? apiGrantSchema.safeParse({ accessToken: tokens.access_token, scope: tokens.scope,
+          ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
           subject: claims.sub, issuer: this.settings.issuer, clientId: this.settings.clientId, resources, expiresAt })
         : undefined;
       return {

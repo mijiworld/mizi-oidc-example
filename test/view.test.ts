@@ -99,7 +99,7 @@ describe("server-rendered OIDC demo", () => {
     expect(html).toContain("2026-09-19T00:00:02.000Z");
     expect(html).toContain('action="/logout" method="post"');
     expect(html).toContain("이 데모에서 로그아웃");
-    expect(html).toContain("미지 계정은 로그아웃되지 않습니다");
+    expect(html).toContain("미지·Google의 로그인까지 종료하지 않습니다");
     expect(html).not.toContain('action="/login"');
   });
 
@@ -295,7 +295,7 @@ describe("server-rendered OIDC demo", () => {
     expect(html).toContain("업무 자동화 시작 목록");
     expect(html).not.toContain("웹 서비스 시작 목록");
     expect(html).toContain("이 데모에 저장됨");
-    expect(html).toContain("30분 세션");
+    expect(html).toContain("유효한 로그인 세션");
     expect(html).toContain("세션 만료나 로그아웃 시 사라집니다");
     expect(html).toContain("선택을 미지에 저장하지 않습니다");
     expect(html).toContain("strict-origin");
@@ -846,9 +846,9 @@ describe("server-rendered OIDC demo", () => {
     expect(html).toContain("중복으로 제외한 항목 수</dt><dd><code>2");
     expect(html).toContain("읽은 API 페이지 수</dt><dd><code>2");
     expect(html).toContain("192KiB");
-    expect(html).toContain("ID 토큰과 갱신 토큰은 보관하지 않습니다");
+    expect(html).toContain("ID 토큰은 보관하지 않습니다");
     expect(html).toContain(
-      "API를 다시 호출하거나 세션 만료 시각을 연장하지 않습니다",
+      "API를 다시 호출하지 않습니다",
     );
   });
 
@@ -1098,12 +1098,14 @@ describe("server-rendered OIDC demo", () => {
       apiConnection: { profile: "ready" as const, skills: "ready" as const },
       apiGrant: {
         accessToken: "server-private-access-token",
+        refreshToken: "server-private-refresh-token",
         scope: "private-scope-value",
       },
       refreshFeedback: "<script>untrusted-feedback</script>",
     };
     const html = renderHome(extra as unknown as HomeViewModel);
     expect(html).not.toContain("server-private-access-token");
+    expect(html).not.toContain("server-private-refresh-token");
     expect(html).not.toContain("private-scope-value");
     expect(html).not.toContain("untrusted-feedback");
     expect(html).not.toContain("<script");

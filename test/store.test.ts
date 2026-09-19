@@ -260,7 +260,13 @@ describe('private API grant and public session boundaries', () => {
     ]) {
       const f = dynamoFixture({ Item: item });
       expect(await f.store.getApiGrant('stale', session.profile.sub, now)).toBeNull();
-      expect(f.send).toHaveBeenCalledTimes(1);
+      // A valid but expired access-only grant is conditionally removed; malformed
+      // or other-member records are never mutated by this read.
+      if ('apiGrant' in item && item.apiGrant?.expiresAt === now && item.expiresAt > now) {
+        expect(f.send).toHaveBeenCalledTimes(2);
+        const cleanup = f.send.mock.calls[1]![0] as UpdateCommand;
+        expect(cleanup.input.ConditionExpression).toContain('#grant.#token = :token');
+      } else expect(f.send).toHaveBeenCalledTimes(1);
     }
   });
 });
@@ -368,7 +374,7 @@ describe('conditional API snapshot updates', () => {
     const f = dynamoFixture();
     await f.store.clearApiGrant('raw-session', session.profile.sub, now);
     const command = f.send.mock.calls[0]![0] as UpdateCommand;
-    expect(command.input.UpdateExpression).toBe('REMOVE #grant, #access');
+    expect(command.input.UpdateExpression).toBe('REMOVE #grant, #access, #refresh');
     expect(command.input.ExpressionAttributeNames).toMatchObject({ '#grant': 'apiGrant', '#access': 'apiAccess' });
     expect(command.input.ConditionExpression).toContain('attribute_exists(pk) AND expiresAt > :now');
     expect(command.input.ConditionExpression).toContain('#profile.#sub = :subject');

@@ -70,17 +70,23 @@ describe("public developer guide", () => {
     const html = renderDeveloperGuide(model);
     expect(html).toContain("POST /refresh-profile");
     expect(html).toContain("POST /refresh-skills");
-    expect(html).toContain("접근 토큰만 서버 전용 DynamoDB 필드");
+    expect(html).toContain("접근·갱신 토큰을 서버 전용 DynamoDB 필드");
     expect(html).toContain("저장 시 암호화(SSE)");
-    expect(html).toContain("ID 토큰과 갱신 토큰은 보관하지 않습니다");
+    expect(html).toContain("ID 토큰은 보관하지 않습니다");
     expect(html).toContain("3600초");
-    expect(html).toContain("30분 세션 만료 중 이른 시각");
+    expect(html).toContain('href="#dg-session"');
+    expect(html).toContain('id="dg-session"');
+    expect(html).toContain("30일 미사용 시 만료, 실제 미지 인증 후 최대 90일");
+    expect(html).toContain("90일 미사용 / 발급 후 최대 365일");
+    expect(html).toContain("기존 데모 세션은 종전 30분 만료를 유지");
+    expect(html).toContain("SESSION_IDLE_SECONDS");
+    expect(html).toContain("SESSION_ABSOLUTE_SECONDS");
     expect(html).toContain(
-      "다른 화면의 조회 결과와 프로젝트 선택, 세션 ID·만료 시각은 바꾸지 않습니다",
+      "다른 화면의 조회 결과와 프로젝트 선택, 세션 ID·로그인 절대 한도는 유지합니다",
     );
     expect(html).toContain("조회 실패 시 이전 결과와 조회 시각을 유지합니다");
     expect(html).toContain(
-      "자동 OAuth 이동이나 갱신 토큰을 통한 자동 갱신은 구현하지 않습니다",
+      "분산 잠금과 조건부 저장으로 갱신을 직렬화",
     );
     expect(html).toContain("TTL 삭제는 지연될 수 있지만");
     expect(html).not.toContain(

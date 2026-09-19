@@ -5,7 +5,7 @@ import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { MemoryStore, SESSION_TTL_SECONDS, type Attempt } from '../src/store.js';
 import type { Identity } from '../src/view-model.js';
-import type { ApiGrant, ApiRefreshResult } from '../src/api-grant.js';
+import { ApiGrantRefreshFailure, type ApiGrant, type ApiRefreshResult } from '../src/api-grant.js';
 import { LoginFailure } from '../src/login-error.js';
 
 const base = 'https://demo.example';
@@ -26,6 +26,7 @@ function fixture() {
       return url.href;
     }),
     complete: vi.fn(async (_callback: URL, _attempt: Attempt): Promise<Identity & { apiGrant?: ApiGrant }> => identity),
+    refreshGrant: vi.fn(async (_grant: ApiGrant): Promise<ApiGrant> => { throw new Error('Unconfigured refresh'); }),
     readApis: vi.fn(async (_grant: ApiGrant, _page: 'profile' | 'skills'): Promise<ApiRefreshResult> => ({})),
   };
   const app = createApp(config, store, provider);
@@ -97,7 +98,7 @@ describe('browser session and callback boundaries', () => {
     expect(forbidden.status).toBe(403);
     expect(forbidden.headers.get('referrer-policy')).toBe('no-referrer');
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    vi.spyOn(f.store, 'getSession').mockRejectedValueOnce(new Error('unavailable'));
+    vi.spyOn(f.store, 'renewSession').mockRejectedValueOnce(new Error('unavailable'));
     const unavailable = await f.app.request(`${base}/`, { headers: { Cookie: cookie } });
     expect(unavailable.status).toBe(503);
     expect(unavailable.headers.get('referrer-policy')).toBe('no-referrer');
@@ -196,6 +197,32 @@ describe('browser session and callback boundaries', () => {
     expect(await home.text()).not.toContain('usr_verified');
     expect(home.headers.getSetCookie()[0]).toContain('Max-Age=0');
   });
+  it('keeps browser login across visits with a persistent cookie, bounded by the original 90-day authentication', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const start = Date.now();
+    const f = fixture();
+    const attempt = await f.begin();
+    const completed = await f.app.request(attempt.callback, { headers: { Cookie: attempt.cookie } });
+    const cookie = sessionCookie(completed);
+    const issued = completed.headers.getSetCookie().find((value) => value.startsWith(cookie))!;
+    expect(issued).toContain('Max-Age=2592000');
+    expect(issued).toContain('HttpOnly');
+    expect(issued).toContain('Secure');
+    for (const days of [20, 40, 60, 80]) {
+      vi.setSystemTime(start + days * 86400000);
+      const home = await f.app.request(`${base}/`, { headers: { Cookie: cookie } });
+      expect(home.status).toBe(200);
+      expect(sessionCookie(home)).toBe(cookie);
+      expect(await home.text()).toContain(identity.profile.sub);
+      const stored = await f.store.getSession(cookie.split('=')[1]!, Math.floor(Date.now() / 1000));
+      expect(stored?.absoluteExpiresAt).toBe(Math.floor(Date.parse(identity.verification.authenticatedAt) / 1000) + 90 * 86400);
+    }
+    vi.setSystemTime(start + 91 * 86400000);
+    const expired = await f.app.request(`${base}/`, { headers: { Cookie: cookie } });
+    expect(await expired.text()).not.toContain(identity.profile.sub);
+    expect(expired.headers.getSetCookie().some((value) => value.includes('Max-Age=0'))).toBe(true);
+    expect(f.provider.authorizationUrl).toHaveBeenCalledTimes(1);
+  });
   it('never reflects or logs provider exception contents and never creates a session on failure', async () => {
     const f = fixture();
     const secret = 'SECRET-TOKEN-CODE-COOKIE';
@@ -210,7 +237,7 @@ describe('browser session and callback boundaries', () => {
     expect(vi.mocked(console.warn).mock.calls).toEqual([['login_failed', { stage: 'oidc_validation' }]]);
     const home = await f.app.request(`${base}/?error=${secret}`);
     expect(await home.text()).not.toContain(secret);
-    vi.spyOn(f.store, 'getSession').mockRejectedValueOnce(new Error(secret));
+    vi.spyOn(f.store, 'renewSession').mockRejectedValueOnce(new Error(secret));
     const unexpected = await f.app.request(`${base}/`, { headers: { Cookie: `__Host-mizi_demo_session=${'s'.repeat(43)}` } });
     expect(unexpected.status).toBe(503);
     expect(logger.mock.calls).toEqual([['request_failed']]);
@@ -289,7 +316,7 @@ describe('optional member API and the demo-owned project board', () => {
       const page = await f.app.request(`${base}/skills?shown=${shown}`, { headers: { Cookie: cookie } });
       expect(page.status).toBe(200);
       expect(page.headers.get('referrer-policy')).toBe('strict-origin');
-      expect(page.headers.getSetCookie()).toHaveLength(0);
+      expect(sessionCookie(page)).toBe(cookie);
       const html = await page.text();
       expect(html).toContain(`Paged skill ${last}`);
       expect(html).not.toContain(`Paged skill ${absent}`);
@@ -328,7 +355,7 @@ describe('optional member API and the demo-owned project board', () => {
     const requested = f.provider.authorizationUrl.mock.calls[1]![0];
     expect(requested).toMatchObject({ readMemberApi: true, readProfileDetails: true,
       readSkillsApi: page === 'skills', returnPage: page });
-    const binding = response.headers.getSetCookie()[0]!.split(';')[0]!;
+    const binding = response.headers.getSetCookie().find((value) => value.startsWith('__Host-mizi_demo_attempt='))!.split(';')[0]!;
     const completed = await f.app.request(`${base}/auth/callback?${new URLSearchParams({
       state: requested.state, code: 'one-use-code', iss: issuer, returnPage: 'https://attacker.example',
     })}`, { headers: { Cookie: `${cookie}; ${binding}` } });
@@ -365,7 +392,7 @@ describe('optional member API and the demo-owned project board', () => {
     const response = await f.app.request(`${base}/connect-profile`, { method: 'POST', headers: { Origin: base, Cookie: cookie } });
     const requested = f.provider.authorizationUrl.mock.calls[1]![0];
     expect(requested).toMatchObject({ readSkillsApi: true, readProfileDetails: true, returnPage: 'profile' });
-    const binding = response.headers.getSetCookie()[0]!.split(';')[0]!;
+    const binding = response.headers.getSetCookie().find((value) => value.startsWith('__Host-mizi_demo_attempt='))!.split(';')[0]!;
     const completed = await f.app.request(`${base}/auth/callback?${new URLSearchParams({
       state: requested.state, code: 'once', iss: issuer,
     })}`, { headers: { Cookie: `${cookie}; ${binding}` } });
@@ -463,9 +490,9 @@ describe('API-only refresh with private server credentials', () => {
       endpoint: `${issuer}/v1/me/skills`, fetchedAt: oldTime, partial: null,
       items: [], requestedLimit: 20 as const, returnedCount: 0, hasMore: false, truncated: false },
   };
-  async function signedIn(withGrant = true, grantOffset = 900) {
+  async function signedIn(withGrant = true, grantOffset = 900, renewable = false) {
     const f = fixture();
-    const grant: ApiGrant = { accessToken: 'private_test_access_token', subject: identity.profile.sub,
+    const grant: ApiGrant = { accessToken: 'private_test_access_token', ...(renewable ? { refreshToken: 'private_test_refresh_token' } : {}), subject: identity.profile.sub,
       issuer, clientId: config.clientId, scope: 'openid profile user:profile user:skills',
       resources: ['/v1/me', '/v1/me/profile', '/v1/me/skills'].map((path) => `${issuer}${path}`),
       expiresAt: Math.floor(Date.now() / 1000) + grantOffset };
@@ -481,7 +508,40 @@ describe('API-only refresh with private server credentials', () => {
     });
     return { ...f, cookie, id, grant, before, post };
   }
-  it.each(['profile', 'skills'] as const)('refreshes %s alone, retaining session TTL, board and other page without OAuth', async (page) => {
+  it('renews an expired API token server-side without navigating to OAuth or losing snapshots', async () => {
+    const f = await signedIn(true, -1, true);
+    const rotated = { ...f.grant, accessToken: 'rotated_access', refreshToken: 'rotated_refresh', expiresAt: Math.floor(Date.now() / 1000) + 3600 };
+    f.provider.refreshGrant.mockResolvedValueOnce(rotated);
+    f.provider.readApis.mockResolvedValueOnce({ memberApi: { ...snapshots.memberApi, fetchedAt: newTime }, profileDetails: { ...snapshots.profileDetails, fetchedAt: newTime } });
+    const response = await f.post('profile');
+    expect(response.headers.get('location')).toBe(`${base}/profile?api_status=updated`);
+    expect(sessionCookie(response)).toBe(f.cookie);
+    expect(f.provider.refreshGrant).toHaveBeenCalledExactlyOnceWith(f.grant);
+    expect(f.provider.readApis).toHaveBeenCalledExactlyOnceWith(rotated, 'profile');
+    expect(f.provider.authorizationUrl).toHaveBeenCalledTimes(1);
+    const current = await f.store.getSession(f.id, Math.floor(Date.now() / 1000));
+    expect(current?.projectGoal).toBe('assistant');
+    expect(current?.absoluteExpiresAt).toBe(f.before?.absoluteExpiresAt);
+    expect(current?.skillsApi).toEqual(snapshots.skillsApi);
+    const html = await (await f.app.request(`${base}/profile`, { headers: { Cookie: f.cookie } })).text();
+    for (const secret of [f.grant.accessToken, f.grant.refreshToken!, rotated.accessToken, rotated.refreshToken]) {
+      expect(html).not.toContain(secret);
+      expect(JSON.stringify(current)).not.toContain(secret);
+    }
+  });
+  it('keeps app login and previous data when refresh is revoked, and asks for explicit reconnection', async () => {
+    const f = await signedIn(true, -1, true);
+    f.provider.refreshGrant.mockRejectedValueOnce(new ApiGrantRefreshFailure('invalid_grant'));
+    const response = await f.post('skills');
+    expect(response.headers.get('location')).toBe(`${base}/skills?api_status=reconnect_required`);
+    expect(f.provider.authorizationUrl).toHaveBeenCalledTimes(1);
+    expect(f.provider.readApis).not.toHaveBeenCalled();
+    const current = await f.store.getSession(f.id, Math.floor(Date.now() / 1000));
+    expect(current).toMatchObject({ ...snapshots, projectGoal: 'assistant', profile: identity.profile });
+    expect(current?.apiAccess).toBeUndefined();
+    expect(await f.store.getApiGrant(f.id, identity.profile.sub, Math.floor(Date.now() / 1000))).toBeNull();
+  });
+  it.each(['profile', 'skills'] as const)('refreshes %s alone, retaining session identity, absolute deadline, board and other page without OAuth', async (page) => {
     const f = await signedIn();
     const fresh = { memberApi: { ...snapshots.memberApi, fetchedAt: newTime },
       profileDetails: { ...snapshots.profileDetails, fetchedAt: newTime },
@@ -490,7 +550,7 @@ describe('API-only refresh with private server credentials', () => {
     f.provider.readApis.mockResolvedValueOnce(fresh);
     const response = await f.post(page);
     expect(response.headers.get('location')).toBe(`${base}/${page}?api_status=updated`);
-    expect(response.headers.getSetCookie()).toHaveLength(0);
+    expect(sessionCookie(response)).toBe(f.cookie);
     expect(f.provider.readApis).toHaveBeenCalledExactlyOnceWith(f.grant, page);
     expect(f.provider.authorizationUrl).toHaveBeenCalledTimes(1);
     expect(f.provider.complete).toHaveBeenCalledTimes(1);
