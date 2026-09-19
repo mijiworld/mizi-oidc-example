@@ -267,8 +267,11 @@ describe("server-rendered OIDC demo", () => {
       expect(html).toContain("2026-09-19T00:01:00.000Z");
       expect(html).not.toContain('action="/service/goal"');
       expect(html).toContain('action="/connect-profile" method="post"');
-      expect(html).toContain("프로필 다시 가져오기");
-      expect(html).toContain("현재 프로젝트 선택은 초기화됩니다");
+      expect(html).toContain("프로필 다시 연결하기");
+      expect(html).toContain(
+        "한 번 다시 연결하면 다음부터는 이 화면에서 바로 다시 가져올 수 있어요",
+      );
+      expect(html).not.toContain("현재 프로젝트 선택은 초기화됩니다");
     },
   );
 
@@ -431,8 +434,10 @@ describe("server-rendered OIDC demo", () => {
     expect(html).toContain(profileDetails.fetchedAt);
     expect(html).toContain(profileDetails.endpoint);
     expect(html).toContain("usr_verified");
-    expect(html).toContain("이전에 조회한 스킬도 함께 새로 가져옵니다");
-    expect(html).toContain("프로필·스킬 읽기 권한이 표시됩니다");
+    expect(html).toContain("다시 연결할 때 스킬 조회 기록이 있다면");
+    expect(html).toContain(
+      "다시 가져오기는 이 두 API만 갱신하고 스킬 목록은 유지합니다",
+    );
     expect(html).not.toContain("TypeScript");
     expect(html).not.toContain('action="/connect-skills"');
     expect(html).not.toContain('action="/service/goal"');
@@ -685,7 +690,7 @@ describe("server-rendered OIDC demo", () => {
     });
     expect(html).toContain("가져온 20개 중 20개 표시");
     expect(html).toContain(
-      "이전에 저장한 목록입니다. 나머지를 보려면 한 번 다시 가져오세요",
+      "이전에 저장한 목록입니다. 아래 버튼으로 최신 목록을 가져오세요",
     );
     expect(html).toContain("마지막 응답의 후속 페이지 안내</dt><dd><code>없음");
     expect(html).toContain(
@@ -766,7 +771,8 @@ describe("server-rendered OIDC demo", () => {
     expect(last).toContain('id="skill-41"');
     expect(last).toContain("가져온 목록을 모두 표시했어요");
     expect(last).not.toContain('href="/skills?shown=');
-    expect(last).toContain("다시 가져오기는 새 인증 요청을 시작합니다");
+    expect(last).toContain("스킬 다시 연결하기");
+    expect(last).not.toContain("현재 프로젝트 선택은 초기화됩니다");
     expect(snapshot.items).toHaveLength(45);
   });
 
@@ -840,7 +846,7 @@ describe("server-rendered OIDC demo", () => {
     expect(html).toContain("중복으로 제외한 항목 수</dt><dd><code>2");
     expect(html).toContain("읽은 API 페이지 수</dt><dd><code>2");
     expect(html).toContain("192KiB");
-    expect(html).toContain("토큰은 폐기합니다");
+    expect(html).toContain("ID 토큰과 갱신 토큰은 보관하지 않습니다");
     expect(html).toContain(
       "API를 다시 호출하거나 세션 만료 시각을 연장하지 않습니다",
     );
@@ -914,5 +920,193 @@ describe("server-rendered OIDC demo", () => {
     expect(html).toContain("기존 로그인은 유지됩니다");
     expect(html).toContain("조회 시점의 정보");
     expect(html).not.toMatch(/<script|<img|<svg|<iframe/);
+  });
+
+  it.each(["profile", "skills"] as const)(
+    "uses the existing API connection to refresh only the %s page",
+    (page) => {
+      const html = renderHome({
+        ...verified,
+        page,
+        memberApi,
+        profileDetails,
+        skillsApi,
+        apiConnection: { profile: "ready", skills: "ready" },
+        projectGoal: "assistant",
+      });
+      expect(html).toContain(`action="/refresh-${page}" method="post"`);
+      expect(html).not.toContain('action="/connect-');
+      expect(html).not.toContain(
+        `action="/refresh-${page === "profile" ? "skills" : "profile"}"`,
+      );
+      expect(html).toContain(
+        "미지 화면으로 이동하지 않고 이 화면의 정보만 새로 가져옵니다",
+      );
+      expect(html).toContain("프로젝트 선택은 그대로 유지돼요");
+      expect(html).toContain('action="/logout"');
+      expect(html).not.toContain("프로젝트 선택은 초기화");
+      expect(html).not.toMatch(/<script|http-equiv="refresh"/);
+    },
+  );
+
+  it.each(["profile", "skills"] as const)(
+    "keeps a failed first %s read retryable when the API connection is ready",
+    (page) => {
+      const html = renderHome({
+        ...verified,
+        page,
+        apiConnection: { profile: "ready", skills: "ready" },
+        memberApi: {
+          status: "error",
+          reason: "unavailable",
+          fetchedAt: memberApi.fetchedAt,
+        },
+        skillsApi: {
+          status: "error",
+          reason: "unavailable",
+          subject: "usr_verified",
+          endpoint: skillsApi.endpoint,
+          fetchedAt: skillsApi.fetchedAt,
+        },
+      });
+      expect(html).toContain(`action="/refresh-${page}" method="post"`);
+      expect(html).not.toContain('action="/connect-');
+      expect(html).not.toContain("회원 API 조회 완료");
+      expect(html).not.toContain("조회한 스킬 목록");
+    },
+  );
+
+  it.each(["profile", "skills"] as const)(
+    "offers an explicit %s reconnect while retaining an old snapshot",
+    (page) => {
+      const html = renderHome({
+        ...verified,
+        page,
+        memberApi,
+        profileDetails,
+        skillsApi,
+        apiConnection: { profile: "reconnect", skills: "reconnect" },
+      });
+      expect(html).toContain(`action="/connect-${page}" method="post"`);
+      expect(html).toContain(
+        `${page === "profile" ? "프로필" : "스킬"} 다시 연결하기`,
+      );
+      expect(html).toContain(
+        "한 번 다시 연결하면 다음부터는 이 화면에서 바로 다시 가져올 수 있어요",
+      );
+      expect(html).toContain(
+        page === "profile" ? memberApi.fetchedAt : skillsApi.fetchedAt,
+      );
+      expect(html).not.toContain('action="/refresh-');
+      expect(html).not.toMatch(/<script|http-equiv="refresh"/);
+    },
+  );
+
+  it.each(["profile", "skills"] as const)(
+    "offers first consent without claiming a %s refresh succeeded",
+    (page) => {
+      const html = renderHome({
+        ...verified,
+        page,
+        apiConnection: { profile: "connect", skills: "connect" },
+      });
+      expect(html).toContain(`action="/connect-${page}" method="post"`);
+      expect(html).toContain("다음 미지 화면에서 정보 제공을 허용해 주세요");
+      expect(html).not.toContain("다시 연결하기</button>");
+      expect(html).not.toContain('action="/refresh-');
+      expect(html).not.toContain("정보를 다시 가져왔어요");
+    },
+  );
+
+  it.each(["unavailable", "reconnect_required", "invalid_response"] as const)(
+    "labels retained results as old after %s and never invents a fresh timestamp",
+    (refreshFeedback) => {
+      const html = renderHome({
+        ...verified,
+        page: "skills",
+        skillsApi,
+        refreshFeedback,
+        apiConnection: {
+          profile: "ready",
+          skills:
+            refreshFeedback === "reconnect_required" ? "reconnect" : "ready",
+        },
+      });
+      expect(html).toContain('role="alert"');
+      expect(html).toContain("표시된 정보와 조회 시각은 이전 조회 결과입니다");
+      expect(html).toContain(skillsApi.fetchedAt);
+      expect(html).toContain("TypeScript");
+      expect(html).not.toContain("정보를 다시 가져왔어요");
+      expect(html).not.toContain('action="/login"');
+      expect(html).toContain(
+        refreshFeedback === "reconnect_required"
+          ? "스킬 다시 연결하기"
+          : "스킬 다시 가져오기",
+      );
+    },
+  );
+
+  it("shows successful and partial refresh feedback without erasing independent query times", () => {
+    const updated = renderHome({
+      ...verified,
+      page: "profile",
+      memberApi,
+      profileDetails,
+      refreshFeedback: "updated",
+      apiConnection: { profile: "ready", skills: "connect" },
+    });
+    expect(updated).toContain('role="status">정보를 다시 가져왔어요');
+    expect(updated).not.toContain("이전 조회 결과입니다");
+    const partial = renderHome({
+      ...verified,
+      page: "profile",
+      memberApi,
+      profileDetails: {
+        ...profileDetails,
+        fetchedAt: "2026-09-19T00:05:00.000Z",
+      },
+      refreshFeedback: "partial",
+      apiConnection: { profile: "ready", skills: "ready" },
+    });
+    expect(partial).toContain(
+      "일부 정보만 새로 가져왔어요. 각 조회 시각을 확인해 주세요",
+    );
+    expect(partial).toContain(memberApi.fetchedAt);
+    expect(partial).toContain("2026-09-19T00:05:00.000Z");
+    expect(partial).not.toContain("정보를 다시 가져왔어요");
+  });
+
+  it("does not claim an old snapshot exists when an initial refresh fails without data", () => {
+    const html = renderHome({
+      ...verified,
+      page: "profile",
+      refreshFeedback: "unavailable",
+      apiConnection: { profile: "ready", skills: "connect" },
+    });
+    expect(html).toContain("새 정보를 가져오지 못했어요");
+    expect(html).not.toContain(
+      "표시된 정보와 조회 시각은 이전 조회 결과입니다",
+    );
+    expect(html).not.toContain("회원 API 조회 완료");
+  });
+
+  it("never renders server-only credentials or unrecognized feedback attached to a view model", () => {
+    const extra = {
+      ...verified,
+      page: "skills" as const,
+      skillsApi,
+      apiConnection: { profile: "ready" as const, skills: "ready" as const },
+      apiGrant: {
+        accessToken: "server-private-access-token",
+        scope: "private-scope-value",
+      },
+      refreshFeedback: "<script>untrusted-feedback</script>",
+    };
+    const html = renderHome(extra as unknown as HomeViewModel);
+    expect(html).not.toContain("server-private-access-token");
+    expect(html).not.toContain("private-scope-value");
+    expect(html).not.toContain("untrusted-feedback");
+    expect(html).not.toContain("<script");
+    expect(html).toContain('action="/refresh-skills"');
   });
 });

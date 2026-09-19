@@ -3,6 +3,8 @@ import { z } from 'zod';
 import type { Identity } from './view-model.js';
 import { memberApiResultSchema, projectGoalSchema, type ProjectGoal } from './service.js';
 import { profileDetailsResultSchema, skillsApiResultSchema } from './extra-api-model.js';
+import { apiGrantSchema, type ApiGrant } from './api-grant.js';
+import { apiAccessSchema, checkedApiGrant, checkedApiPatch, type ApiAccess, type ApiSnapshotPatch } from './session-api.js';
 
 export const ATTEMPT_TTL_SECONDS = 600;
 export const SESSION_TTL_SECONDS = 1800;
@@ -20,7 +22,7 @@ export const attemptSchema = z.object({
   returnPage: z.enum(['profile', 'skills']).optional(),
 });
 export type Attempt = z.infer<typeof attemptSchema>;
-export interface Session extends Identity { expiresAt: number; projectGoal?: ProjectGoal }
+export interface Session extends Identity { expiresAt: number; projectGoal?: ProjectGoal; apiAccess?: ApiAccess }
 export const sessionSchema: z.ZodType<Session> = z.object({
   expiresAt: z.number().int().positive(),
   profile: z.object({ sub: z.string().min(1), nickname: z.string().optional() }),
@@ -28,6 +30,7 @@ export const sessionSchema: z.ZodType<Session> = z.object({
   profileDetails: profileDetailsResultSchema.optional(),
   skillsApi: skillsApiResultSchema.optional(),
   projectGoal: projectGoalSchema.optional(),
+  apiAccess: apiAccessSchema.optional(),
   verification: z.object({
     issuer: z.string(), audience: z.string(), sub: z.string().min(1), algorithm: z.literal('RS256'),
     nonce: z.literal(true), pkce: z.literal('S256'), state: z.literal(true), issuerResponse: z.literal(true),
@@ -47,8 +50,11 @@ export interface Store {
   putAttempt(attempt: Attempt): Promise<void>;
   /** A mismatched browser or expired attempt must never consume a valid attempt. */
   consumeAttempt(state: string, bindingHash: string, now: number): Promise<Attempt | null>;
-  putSession(id: string, session: Session): Promise<void>;
+  putSession(id: string, session: Session, grant?: ApiGrant): Promise<void>;
   getSession(id: string, now: number): Promise<Session | null>;
+  getApiGrant(id: string, subject: string, now: number): Promise<ApiGrant | null>;
+  clearApiGrant(id: string, subject: string, now: number): Promise<void>;
+  saveApiResults(id: string, subject: string, grantExpiresAt: number, patch: ApiSnapshotPatch, now: number): Promise<boolean>;
   deleteSession(id: string): Promise<void>;
   setProjectGoal(id: string, subject: string, goal: ProjectGoal, now: number): Promise<boolean>;
 }
@@ -57,6 +63,7 @@ export interface Store {
 export class MemoryStore implements Store {
   private readonly attempts = new Map<string, Attempt>();
   private readonly sessions = new Map<string, Session>();
+  private readonly grants = new Map<string, ApiGrant>();
 
   async putAttempt(attempt: Attempt): Promise<void> {
     this.cleanExpired();
@@ -70,16 +77,51 @@ export class MemoryStore implements Store {
     this.attempts.delete(key); // No await between comparison and deletion.
     return structuredClone(value);
   }
-  async putSession(id: string, session: Session): Promise<void> {
+  async putSession(id: string, session: Session, inputGrant?: ApiGrant): Promise<void> {
     this.cleanExpired();
     if (this.sessions.size >= 10000) throw new Error('Session capacity exceeded.');
-    this.sessions.set(digest(id), structuredClone(sessionSchema.parse(session)));
+    const value = sessionSchema.parse(session);
+    const grant = checkedApiGrant(inputGrant, value.profile.sub, value.verification.issuer,
+      value.verification.audience, value.expiresAt);
+    const key = digest(id);
+    if (this.sessions.has(key)) throw new Error('Session already exists.');
+    delete value.apiAccess;
+    if (grant) value.apiAccess = apiAccessSchema.parse(grant);
+    this.sessions.set(key, structuredClone(value));
+    if (grant) this.grants.set(key, structuredClone(grant));
   }
   async getSession(id: string, now: number): Promise<Session | null> {
     const value = this.sessions.get(digest(id));
     return value && value.expiresAt > now ? structuredClone(value) : null;
   }
-  async deleteSession(id: string): Promise<void> { this.sessions.delete(digest(id)); }
+  async getApiGrant(id: string, subject: string, now: number): Promise<ApiGrant | null> {
+    const key = digest(id);
+    const session = this.sessions.get(key);
+    const parsed = apiGrantSchema.safeParse(this.grants.get(key));
+    return session && session.expiresAt > now && session.profile.sub === subject && parsed.success &&
+      parsed.data.expiresAt > now && parsed.data.subject === subject ? structuredClone(parsed.data) : null;
+  }
+  async clearApiGrant(id: string, subject: string, now: number): Promise<void> {
+    const key = digest(id);
+    const session = this.sessions.get(key);
+    if (!session || session.expiresAt <= now || session.profile.sub !== subject) return;
+    this.grants.delete(key);
+    delete session.apiAccess;
+  }
+  async saveApiResults(id: string, subject: string, grantExpiresAt: number, input: ApiSnapshotPatch, now: number): Promise<boolean> {
+    const patch = checkedApiPatch(input, subject);
+    const key = digest(id);
+    const session = this.sessions.get(key);
+    const grant = this.grants.get(key);
+    if (!session || session.expiresAt <= now || session.profile.sub !== subject || !grant ||
+        grant.subject !== subject || grant.expiresAt <= now || grant.expiresAt !== grantExpiresAt) return false;
+    Object.assign(session, structuredClone(patch));
+    return true;
+  }
+  async deleteSession(id: string): Promise<void> {
+    this.sessions.delete(digest(id));
+    this.grants.delete(digest(id));
+  }
   async setProjectGoal(id: string, subject: string, goal: ProjectGoal, now: number): Promise<boolean> {
     const value = this.sessions.get(digest(id));
     if (!value || value.expiresAt <= now || value.profile.sub !== subject ||
@@ -90,6 +132,9 @@ export class MemoryStore implements Store {
   private cleanExpired(): void {
     const now = Math.floor(Date.now() / 1000);
     for (const [key, item] of this.attempts) if (item.expiresAt <= now) this.attempts.delete(key);
-    for (const [key, item] of this.sessions) if (item.expiresAt <= now) this.sessions.delete(key);
+    for (const [key, item] of this.sessions) if (item.expiresAt <= now) {
+      this.sessions.delete(key);
+      this.grants.delete(key);
+    }
   }
 }

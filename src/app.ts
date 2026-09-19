@@ -4,11 +4,13 @@ import { bodyLimit } from 'hono/body-limit';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { Config } from './config.js';
 import type { OidcProvider } from './oidc.js';
-import { ATTEMPT_TTL_SECONDS, SESSION_TTL_SECONDS, digest, opaqueSchema, type Store } from './store.js';
+import { ATTEMPT_TTL_SECONDS, SESSION_TTL_SECONDS, digest, opaqueSchema, type Store, type Session } from './store.js';
 import { renderHome } from './view.js';
 import { LoginFailure, type LoginStage } from './login-error.js';
 import { projectGoalSchema } from './service.js';
 import type { HomeViewModel } from './view-model.js';
+import { ApiGrantUnavailable, type ApiRefreshPage } from './api-grant.js';
+import { ApiSnapshotInvalid, checkedApiPatch, type ApiSnapshotPatch } from './session-api.js';
 
 const random = (): string => randomBytes(32).toString('base64url');
 const seconds = (): number => Math.floor(Date.now() / 1000);
@@ -22,6 +24,18 @@ const serviceErrors: Record<string, string> = {
   session_expired: '데모 세션이 만료됐습니다. 다시 로그인해 주세요.',
   save_failed: '프로젝트 목표를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.',
 };
+const refreshFeedback = ['updated', 'partial', 'unavailable', 'reconnect_required', 'invalid_response'] as const;
+
+function apiConnection(session: Session, config: Config): NonNullable<HomeViewModel['apiConnection']> {
+  const access = session.apiAccess;
+  const ready = (scope: string, paths: string[]) => access && access.expiresAt > seconds() &&
+    access.scope.split(' ').includes(scope) && paths.every((path) => access.resources.includes(new URL(path, config.issuer).href));
+  return {
+    profile: ready('user:profile', ['/v1/me', '/v1/me/profile']) ? 'ready'
+      : session.memberApi || session.profileDetails ? 'reconnect' : 'connect',
+    skills: ready('user:skills', ['/v1/me/skills']) ? 'ready' : session.skillsApi ? 'reconnect' : 'connect',
+  };
+}
 
 export function createApp(config: Config, store: Store, oidc: OidcProvider) {
   const app = new Hono();
@@ -89,7 +103,9 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
       loginAction: '/login', logoutAction: '/logout', authenticated: Boolean(session),
       ...(session ? { profile: session.profile, verification: session.verification,
         memberApi: session.memberApi, projectGoal: session.projectGoal,
-        profileDetails: session.profileDetails, skillsApi: session.skillsApi } : {}),
+        profileDetails: session.profileDetails, skillsApi: session.skillsApi, apiConnection: apiConnection(session, config) } : {}),
+      ...(session && refreshFeedback.some((value) => value === c.req.query('api_status'))
+        ? { refreshFeedback: c.req.query('api_status') as typeof refreshFeedback[number] } : {}),
       ...(errors[c.req.query('error') ?? ''] ? { error: errors[c.req.query('error')!] } : {}),
       ...(serviceErrors[c.req.query('service_error') ?? ''] ? { serviceError: serviceErrors[c.req.query('service_error')!] } : {}),
     }));
@@ -128,6 +144,55 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
   app.post('/login', (c) => startLogin(c));
   app.post('/connect-profile', (c) => startLogin(c, 'profile'));
   app.post('/connect-skills', (c) => startLogin(c, 'skills'));
+
+  async function refresh(c: Context, page: ApiRefreshPage) {
+    if (c.req.header('Origin') !== config.baseUrl) return c.text('허용되지 않은 요청입니다.', 403);
+    const id = getCookie(c, sessionCookie);
+    const session = id && opaqueSchema.safeParse(id).success ? await store.getSession(id, seconds()) : null;
+    if (!id || !session) return c.redirect(`${config.baseUrl}/?service_error=session_expired`, 303);
+    const finish = (status: typeof refreshFeedback[number]) => c.redirect(`${config.baseUrl}/${page}?api_status=${status}`, 303);
+    try {
+      const grant = await store.getApiGrant(id, session.profile.sub, seconds());
+      if (!grant) {
+        await store.clearApiGrant(id, session.profile.sub, seconds());
+        return finish('reconnect_required');
+      }
+      if (!oidc.readApis) return finish('unavailable');
+      const result = await oidc.readApis(grant, page);
+      const requested = page === 'profile' ? [result.memberApi, result.profileDetails] : [result.skillsApi];
+      if (requested.some((value) => value?.status === 'error' &&
+          ['unauthorized', 'forbidden', 'scope_missing'].includes(value.reason)) ||
+          (page === 'skills' && result.skillsApi?.status === 'success' && result.skillsApi.collection?.authorizationFailure)) {
+        await store.clearApiGrant(id, session.profile.sub, seconds());
+        return finish('reconnect_required');
+      }
+      // Update only the requested successful fields. Failures keep their old snapshots.
+      const patch: ApiSnapshotPatch = {};
+      if (page === 'profile') {
+        if (result.memberApi?.status === 'success') patch.memberApi = result.memberApi;
+        if (result.profileDetails?.status === 'success') patch.profileDetails = result.profileDetails;
+      } else if (result.skillsApi?.status === 'success') patch.skillsApi = result.skillsApi;
+      if (!Object.keys(patch).length) return finish(requested.some((value) => value?.status === 'error' &&
+        value.reason === 'invalid_response') ? 'invalid_response' : 'unavailable');
+      const checked = checkedApiPatch(patch, session.profile.sub);
+      if (!await store.saveApiResults(id, session.profile.sub, grant.expiresAt, checked, seconds())) {
+        return finish('reconnect_required');
+      }
+      const partial = requested.some((value) => !value || value.status === 'error') ||
+        (patch.profileDetails?.status === 'success' && patch.profileDetails.partial === true) ||
+        (patch.skillsApi?.status === 'success' && (patch.skillsApi.truncated || patch.skillsApi.partial === true));
+      return finish(partial ? 'partial' : 'updated');
+    } catch (error) {
+      if (error instanceof ApiGrantUnavailable || error instanceof LoginFailure || error instanceof ApiSnapshotInvalid) {
+        await store.clearApiGrant(id, session.profile.sub, seconds());
+        return finish(error instanceof ApiGrantUnavailable ? 'reconnect_required' : 'invalid_response');
+      }
+      // Never expose API bodies, tokens, SDK errors or validation input in logs/UI.
+      return finish('unavailable');
+    }
+  }
+  app.post('/refresh-profile', (c) => refresh(c, 'profile'));
+  app.post('/refresh-skills', (c) => refresh(c, 'skills'));
 
   app.post('/service/goal', bodyLimit({ maxSize: 1024,
     onError: (c) => c.text('요청 내용이 너무 큽니다.', 413) }), async (c) => {
@@ -170,12 +235,19 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
       if (!attempt) throw new Error('Invalid login attempt.');
       deleteCookie(c, attemptCookie, cookieOptions);
       stage = 'oidc_validation';
-      const identity = await oidc.complete(callback, attempt);
+      const { apiGrant, ...identity } = await oidc.complete(callback, attempt);
+      const previousId = getCookie(c, sessionCookie);
+      const previous = previousId && opaqueSchema.safeParse(previousId).success
+        ? await store.getSession(previousId, seconds()) : null;
+      const preserveGoal = previous?.profile.sub === identity.profile.sub &&
+        previous.verification.issuer === identity.verification.issuer &&
+        previous.verification.audience === identity.verification.audience && identity.memberApi?.status === 'success'
+        ? previous.projectGoal : undefined;
       const id = random();
       stage = 'session_write';
-      await store.putSession(id, { ...identity, expiresAt: seconds() + SESSION_TTL_SECONDS });
-      const previous = getCookie(c, sessionCookie);
-      if (previous && opaqueSchema.safeParse(previous).success) await store.deleteSession(previous);
+      await store.putSession(id, { ...identity, expiresAt: seconds() + SESSION_TTL_SECONDS,
+        ...(preserveGoal ? { projectGoal: preserveGoal } : {}) }, apiGrant);
+      if (previousId && opaqueSchema.safeParse(previousId).success) await store.deleteSession(previousId);
       setCookie(c, sessionCookie, id, { ...cookieOptions, maxAge: SESSION_TTL_SECONDS });
       return c.redirect(`${config.baseUrl}/${attempt.returnPage ?? ''}`, 303);
     } catch (error) {

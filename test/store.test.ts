@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { DynamoStore } from '../src/dynamo-store.js';
 import { loadConfig } from '../src/config.js';
 import { digest, MemoryStore, type Attempt, type Session } from '../src/store.js';
+import type { ApiGrant } from '../src/api-grant.js';
+import type { ApiSnapshotPatch } from '../src/session-api.js';
 
 const now = Math.floor(Date.now() / 1000);
 const attempt: Attempt = { state: 's'.repeat(43), nonce: 'n'.repeat(43), codeVerifier: 'v'.repeat(43),
@@ -132,6 +134,250 @@ it('updates only the own-session project field with atomic expiry and member con
   expect(command.input.ExpressionAttributeValues).toMatchObject({ ':subject': session.profile.sub, ':goal': 'automation', ':now': now });
   f.send.mockRejectedValueOnce(Object.assign(new Error('expired or removed'), { name: 'ConditionalCheckFailedException' }));
   expect(await f.store.setProjectGoal('raw-session', session.profile.sub, 'website', now)).toBe(false);
+});
+
+const apiSession: Session = {
+  ...session,
+  memberApi: { status: 'success', fetchedAt: '2026-09-19T00:00:00.000Z',
+    profile: { id: session.profile.sub, nickname: '이전 닉네임', githubConnected: false } },
+  profileDetails: { status: 'success', subject: session.profile.sub,
+    endpoint: 'https://issuer.example/v1/me/profile', fetchedAt: '2026-09-19T00:00:01.000Z', partial: false,
+    profile: { bio: '이전 소개', role: null, interests: ['웹'] } },
+  skillsApi: { status: 'success', subject: session.profile.sub, endpoint: 'https://issuer.example/v1/me/skills',
+    fetchedAt: '2026-09-19T00:00:02.000Z', partial: null, items: [], requestedLimit: 20,
+    returnedCount: 0, hasMore: false, truncated: false },
+  projectGoal: 'assistant',
+};
+const apiGrant: ApiGrant = {
+  accessToken: 'dgt_synthetic_test_credential', scope: 'openid profile user:profile user:skills',
+  subject: session.profile.sub, issuer: session.verification.issuer, clientId: session.verification.audience,
+  resources: ['https://issuer.example/v1/me', 'https://issuer.example/v1/me/profile', 'https://issuer.example/v1/me/skills'],
+  expiresAt: now + 900,
+};
+const memberUpdate: ApiSnapshotPatch = {
+  memberApi: { status: 'success', fetchedAt: '2026-09-19T00:10:00.000Z',
+    profile: { id: session.profile.sub, nickname: '새 닉네임', githubConnected: true } },
+};
+const conditionalFailure = () => Object.assign(new Error('condition failed'), { name: 'ConditionalCheckFailedException' });
+
+describe('private API grant and public session boundaries', () => {
+  it('returns only non-secret connection metadata and clones both public and private reads in memory', async () => {
+    const store = new MemoryStore();
+    await store.putSession('api-session', apiSession, apiGrant);
+    const publicView = await store.getSession('api-session', now);
+    expect(publicView).toEqual({ ...apiSession,
+      apiAccess: { scope: apiGrant.scope, resources: apiGrant.resources, expiresAt: apiGrant.expiresAt } });
+    expect(JSON.stringify(publicView)).not.toContain(apiGrant.accessToken);
+    expect(publicView).not.toHaveProperty('apiGrant');
+    const privateView = await store.getApiGrant('api-session', session.profile.sub, now);
+    expect(privateView).toEqual(apiGrant);
+    privateView!.accessToken = 'modified-read';
+    publicView!.profile.nickname = 'modified-public-read';
+    expect((await store.getApiGrant('api-session', session.profile.sub, now))!.accessToken).toBe(apiGrant.accessToken);
+    expect((await store.getSession('api-session', now))!.profile.nickname).toBe(apiSession.profile.nickname);
+    expect(await store.getApiGrant('api-session', 'different-member', now)).toBeNull();
+  });
+
+  it('writes credentials only in a private Dynamo attribute and excludes them in normal reads', async () => {
+    const f = dynamoFixture();
+    await f.store.putSession('raw-session-id', apiSession, apiGrant);
+    const put = f.send.mock.calls[0]![0] as PutCommand;
+    const item = put.input.Item!;
+    expect(item.apiGrant).toEqual(apiGrant);
+    expect(item.apiAccess).toEqual({ scope: apiGrant.scope, resources: apiGrant.resources, expiresAt: apiGrant.expiresAt });
+    expect(item.apiAccess).not.toHaveProperty('accessToken');
+    expect(item.pk).toBe(`session:${digest('raw-session-id')}`);
+    expect(put.input.ConditionExpression).toBe('attribute_not_exists(pk)');
+    // Even an over-broad database result must be stripped by the public parser.
+    f.send.mockResolvedValueOnce({ Item: { ...item, access_token: 'extra-private-field' } });
+    const publicView = await f.store.getSession('raw-session-id', now);
+    expect(JSON.stringify(publicView)).not.toContain(apiGrant.accessToken);
+    expect(JSON.stringify(publicView)).not.toContain('extra-private-field');
+    expect(publicView).toMatchObject({ projectGoal: 'assistant', expiresAt: session.expiresAt });
+    const get = f.send.mock.calls[1]![0] as GetCommand;
+    expect(get.input.ConsistentRead).toBe(true);
+    expect(Object.values(get.input.ExpressionAttributeNames!)).not.toContain('apiGrant');
+    expect(get.input.ProjectionExpression).not.toContain('#grant');
+    f.send.mockResolvedValueOnce({ Item: item });
+    expect(await f.store.getApiGrant('raw-session-id', session.profile.sub, now)).toEqual(apiGrant);
+    const privateGet = f.send.mock.calls[2]![0] as GetCommand;
+    expect(privateGet.input.ConsistentRead).toBe(true);
+    expect(Object.values(privateGet.input.ExpressionAttributeNames!)).toContain('apiGrant');
+  });
+
+  it.each(['memory', 'dynamo'] as const)('binds %s credentials to subject, issuer and client before persisting', async (kind) => {
+    for (const override of [{ subject: 'other-member' }, { issuer: 'https://other.example' }, { clientId: 'other-client' }]) {
+      const f = dynamoFixture();
+      const store = kind === 'memory' ? new MemoryStore() : f.store;
+      await expect(store.putSession('bound', apiSession, { ...apiGrant, ...override })).rejects.toThrow('identity mismatch');
+      if (kind === 'memory') expect(await store.getSession('bound', now)).toBeNull();
+      else expect(f.send).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(['memory', 'dynamo'] as const)('clamps %s grant lifetime to the earlier token or session expiry', async (kind) => {
+    for (const tokenExpiresAt of [now + 30, session.expiresAt + 3600]) {
+      const f = dynamoFixture();
+      const store = kind === 'memory' ? new MemoryStore() : f.store;
+      await store.putSession('clamped', apiSession, { ...apiGrant, expiresAt: tokenExpiresAt });
+      const expectedExpiry = Math.min(tokenExpiresAt, session.expiresAt);
+      if (kind === 'memory') {
+        expect((await store.getApiGrant('clamped', session.profile.sub, now))!.expiresAt).toBe(expectedExpiry);
+        expect((await store.getSession('clamped', now))!.apiAccess!.expiresAt).toBe(expectedExpiry);
+        expect(await store.getApiGrant('clamped', session.profile.sub, expectedExpiry)).toBeNull();
+      } else {
+        const item = (f.send.mock.calls[0]![0] as PutCommand).input.Item!;
+        expect(item.apiGrant.expiresAt).toBe(expectedExpiry);
+        expect(item.apiAccess.expiresAt).toBe(expectedExpiry);
+        expect(item.expiresAt).toBe(session.expiresAt);
+      }
+    }
+  });
+
+  it.each(['memory', 'dynamo'] as const)('keeps %s legacy sessions usable without accepting forged public capability metadata', async (kind) => {
+    const f = dynamoFixture();
+    const store = kind === 'memory' ? new MemoryStore() : f.store;
+    const forged = { ...apiSession, apiAccess: { scope: apiGrant.scope, resources: apiGrant.resources, expiresAt: apiGrant.expiresAt } };
+    await store.putSession('legacy', forged);
+    if (kind === 'dynamo') {
+      const item = (f.send.mock.calls[0]![0] as PutCommand).input.Item!;
+      expect(item).not.toHaveProperty('apiGrant');
+      expect(item).not.toHaveProperty('apiAccess');
+      f.send.mockResolvedValue({ Item: item });
+    }
+    expect(await store.getSession('legacy', now)).toEqual(apiSession);
+    expect(await store.getApiGrant('legacy', session.profile.sub, now)).toBeNull();
+  });
+
+  it('rejects expired or mismatched private Dynamo records while TTL deletion is still pending', async () => {
+    for (const item of [
+      { ...apiSession, apiGrant: { ...apiGrant, expiresAt: now } },
+      { ...apiSession, expiresAt: now, apiGrant },
+      { ...apiSession, profile: { sub: 'other-member' }, apiGrant },
+      { ...apiSession, apiGrant: { ...apiGrant, subject: 'other-member' } },
+      { ...apiSession, apiGrant: { ...apiGrant, accessToken: 'invalid\ncredential' } },
+      apiSession,
+    ]) {
+      const f = dynamoFixture({ Item: item });
+      expect(await f.store.getApiGrant('stale', session.profile.sub, now)).toBeNull();
+      expect(f.send).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
+describe('conditional API snapshot updates', () => {
+  it('updates successful fields only while preserving other snapshots, project choice and expiry', async () => {
+    const store = new MemoryStore();
+    await store.putSession('refresh', apiSession, apiGrant);
+    const before = await store.getSession('refresh', now);
+    expect(await store.saveApiResults('refresh', session.profile.sub, apiGrant.expiresAt, memberUpdate, now)).toBe(true);
+    expect(await store.getSession('refresh', now)).toEqual({ ...before, ...memberUpdate });
+    expect(await store.getApiGrant('refresh', session.profile.sub, now)).toEqual(apiGrant);
+    const partialSkills: ApiSnapshotPatch = { skillsApi: { ...apiSession.skillsApi!, status: 'success',
+      subject: session.profile.sub, endpoint: 'https://issuer.example/v1/me/skills', fetchedAt: '2026-09-19T00:20:00.000Z',
+      partial: null, items: [], requestedLimit: 20, returnedCount: 0, hasMore: true, truncated: true,
+      collection: { pages: 1, startedAt: '2026-09-19T00:19:59.000Z', stoppedReason: 'upstream_error', duplicateCount: 0 } } };
+    expect(await store.saveApiResults('refresh', session.profile.sub, apiGrant.expiresAt, partialSkills, now)).toBe(true);
+    expect(await store.getSession('refresh', now)).toEqual({ ...before, ...memberUpdate, ...partialSkills });
+  });
+
+  it('rejects unsuccessful, empty and foreign-subject updates before they overwrite prior results', async () => {
+    const store = new MemoryStore();
+    await store.putSession('refresh', apiSession, apiGrant);
+    const before = await store.getSession('refresh', now);
+    const patches: ApiSnapshotPatch[] = [
+      {},
+      { memberApi: { status: 'error', reason: 'unavailable', fetchedAt: '2026-09-19T00:20:00.000Z' } },
+      { memberApi: { status: 'success', fetchedAt: '2026-09-19T00:20:00.000Z', profile: { id: 'other', nickname: 'other', githubConnected: true } } },
+      { profileDetails: { status: 'error', subject: session.profile.sub, endpoint: 'https://issuer.example/v1/me/profile',
+        fetchedAt: '2026-09-19T00:20:00.000Z', reason: 'unavailable' } },
+      { skillsApi: { status: 'error', subject: session.profile.sub, endpoint: 'https://issuer.example/v1/me/skills',
+        fetchedAt: '2026-09-19T00:20:00.000Z', reason: 'forbidden' } },
+    ];
+    for (const patch of patches) {
+      await expect(store.saveApiResults('refresh', session.profile.sub, apiGrant.expiresAt, patch, now)).rejects.toThrow();
+      expect(await store.getSession('refresh', now)).toEqual(before);
+      const f = dynamoFixture();
+      await expect(f.store.saveApiResults('refresh', session.profile.sub, apiGrant.expiresAt, patch, now)).rejects.toThrow();
+      expect(f.send).not.toHaveBeenCalled();
+    }
+  });
+
+  it('does not accept session or credential mutations hidden beside an allowed API patch', async () => {
+    const store = new MemoryStore();
+    await store.putSession('refresh', apiSession, apiGrant);
+    const before = await store.getSession('refresh', now);
+    const extra = { ...memberUpdate, expiresAt: now + 99999, projectGoal: 'website',
+      apiGrant: { ...apiGrant, accessToken: 'replacement' }, apiAccess: { scope: 'changed' } };
+    expect(await store.saveApiResults('refresh', session.profile.sub, apiGrant.expiresAt, extra, now)).toBe(true);
+    expect(await store.getSession('refresh', now)).toEqual({ ...before, ...memberUpdate });
+    expect(await store.getApiGrant('refresh', session.profile.sub, now)).toEqual(apiGrant);
+  });
+
+  it('lets logout or credential removal win over an in-flight API response', async () => {
+    for (const removed of ['logout', 'grant'] as const) {
+      const store = new MemoryStore();
+      await store.putSession('in-flight', apiSession, apiGrant);
+      const capturedGrant = await store.getApiGrant('in-flight', session.profile.sub, now);
+      expect(capturedGrant).not.toBeNull();
+      if (removed === 'logout') await store.deleteSession('in-flight');
+      else await store.clearApiGrant('in-flight', session.profile.sub, now);
+      expect(await store.saveApiResults('in-flight', session.profile.sub, capturedGrant!.expiresAt, memberUpdate, now)).toBe(false);
+      expect(await store.getApiGrant('in-flight', session.profile.sub, now)).toBeNull();
+      expect(await store.getSession('in-flight', now)).toEqual(removed === 'logout' ? null : apiSession);
+    }
+  });
+
+  it('does not write after token/session expiry, for another session owner, or against a different grant generation', async () => {
+    const store = new MemoryStore();
+    await store.putSession('refresh', apiSession, apiGrant);
+    for (const when of [apiGrant.expiresAt, session.expiresAt]) {
+      expect(await store.saveApiResults('refresh', session.profile.sub, apiGrant.expiresAt, memberUpdate, when)).toBe(false);
+    }
+    expect(await store.saveApiResults('refresh', session.profile.sub, apiGrant.expiresAt + 1, memberUpdate, now)).toBe(false);
+    const foreignPatch: ApiSnapshotPatch = { memberApi: { status: 'success', fetchedAt: '2026-09-19T00:20:00.000Z',
+      profile: { id: 'other-member', nickname: 'other', githubConnected: false } } };
+    expect(await store.saveApiResults('refresh', 'other-member', apiGrant.expiresAt, foreignPatch, now)).toBe(false);
+    await store.clearApiGrant('refresh', 'other-member', now);
+    expect(await store.getApiGrant('refresh', session.profile.sub, now)).toEqual(apiGrant);
+    expect((await store.getSession('refresh', now))!.memberApi).toEqual(apiSession.memberApi);
+  });
+
+  it('conditions Dynamo updates on the still-live same-owner grant without writing expiry or project fields', async () => {
+    const f = dynamoFixture();
+    expect(await f.store.saveApiResults('raw-session', session.profile.sub, apiGrant.expiresAt, memberUpdate, now)).toBe(true);
+    const command = f.send.mock.calls[0]![0] as UpdateCommand;
+    expect(command).toBeInstanceOf(UpdateCommand);
+    expect(command.input.Key).toEqual({ pk: `session:${digest('raw-session')}` });
+    expect(command.input.ConditionExpression).toContain('attribute_exists(pk) AND expiresAt > :now');
+    expect(command.input.ConditionExpression).toContain('#profile.#sub = :subject');
+    expect(command.input.ConditionExpression).toContain('#grant.#grantSubject = :subject');
+    expect(command.input.ConditionExpression).toContain('#grant.#grantExpiry = :grantExpiry');
+    expect(command.input.ConditionExpression).toContain('#grant.#grantExpiry > :now');
+    expect(command.input.ExpressionAttributeValues).toMatchObject({ ':now': now, ':subject': session.profile.sub, ':grantExpiry': apiGrant.expiresAt });
+    const assigned = command.input.UpdateExpression!.replace(/^SET /, '').split(', ').map((entry) => entry.split(' = ')[0]!);
+    expect(assigned.map((alias) => command.input.ExpressionAttributeNames![alias])).toEqual(['memberApi']);
+    expect(JSON.stringify(command.input)).not.toContain(apiGrant.accessToken);
+    f.send.mockRejectedValueOnce(conditionalFailure());
+    expect(await f.store.saveApiResults('raw-session', session.profile.sub, apiGrant.expiresAt, memberUpdate, now)).toBe(false);
+    f.send.mockRejectedValueOnce(new Error('storage unavailable'));
+    await expect(f.store.saveApiResults('raw-session', session.profile.sub, apiGrant.expiresAt, memberUpdate, now)).rejects.toThrow('storage unavailable');
+  });
+
+  it('clears only private grant and public capabilities with an atomic owner/expiry condition in Dynamo', async () => {
+    const f = dynamoFixture();
+    await f.store.clearApiGrant('raw-session', session.profile.sub, now);
+    const command = f.send.mock.calls[0]![0] as UpdateCommand;
+    expect(command.input.UpdateExpression).toBe('REMOVE #grant, #access');
+    expect(command.input.ExpressionAttributeNames).toMatchObject({ '#grant': 'apiGrant', '#access': 'apiAccess' });
+    expect(command.input.ConditionExpression).toContain('attribute_exists(pk) AND expiresAt > :now');
+    expect(command.input.ConditionExpression).toContain('#profile.#sub = :subject');
+    expect(command.input.ExpressionAttributeValues).toEqual({ ':now': now, ':subject': session.profile.sub });
+    f.send.mockRejectedValueOnce(conditionalFailure());
+    await expect(f.store.clearApiGrant('raw-session', session.profile.sub, now)).resolves.toBeUndefined();
+    f.send.mockRejectedValueOnce(new Error('storage unavailable'));
+    await expect(f.store.clearApiGrant('raw-session', session.profile.sub, now)).rejects.toThrow('storage unavailable');
+  });
 });
 
 describe('trusted environment configuration', () => {

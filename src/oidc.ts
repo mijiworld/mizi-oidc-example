@@ -8,10 +8,15 @@ import type { Identity } from './view-model.js';
 import { LoginFailure, type LoginStage } from './login-error.js';
 import { memberApiResource, readMemberApi } from './member-api.js';
 import { profileDetailsResource, skillsApiResource, readProfileDetails, readSkillsApi } from './extra-api.js';
+import { API_GRANT_MAX_SECONDS, apiGrantSchema, type ApiGrant, type ApiRefreshPage, type ApiRefreshResult } from './api-grant.js';
+import { refreshApis } from './api-refresh.js';
+
+export type OidcIdentity = Identity & { apiGrant?: ApiGrant };
 
 export interface OidcProvider {
   authorizationUrl(attempt: Attempt): Promise<string>;
-  complete(callback: URL, attempt: Attempt): Promise<Identity>;
+  complete(callback: URL, attempt: Attempt): Promise<OidcIdentity>;
+  readApis?(grant: ApiGrant, page: ApiRefreshPage): Promise<ApiRefreshResult>;
 }
 
 const claimsSchema = z.object({
@@ -102,7 +107,11 @@ export class MiziOidcProvider implements OidcProvider {
     return client.buildAuthorizationUrl(configuration, parameters).href;
   }
 
-  async complete(callback: URL, attempt: Attempt): Promise<Identity> {
+  async readApis(grant: ApiGrant, page: ApiRefreshPage): Promise<ApiRefreshResult> {
+    return refreshApis(this.settings, grant, page, this.fetcher);
+  }
+
+  async complete(callback: URL, attempt: Attempt): Promise<OidcIdentity> {
     const startedAt = Date.now();
     let stage: LoginStage = 'callback';
     try {
@@ -119,12 +128,14 @@ export class MiziOidcProvider implements OidcProvider {
       stage = 'discovery';
       const configuration = await this.configuration();
       stage = 'token_exchange';
+      const resources = apiResources(this.settings.issuer, attempt);
       const resourceParameters = new URLSearchParams();
-      for (const resource of apiResources(this.settings.issuer, attempt)) resourceParameters.append('resource', resource);
+      for (const resource of resources) resourceParameters.append('resource', resource);
       const tokens = await client.authorizationCodeGrant(configuration, callback, {
         expectedState: attempt.state, expectedNonce: attempt.nonce,
         pkceCodeVerifier: attempt.codeVerifier, idTokenExpected: true,
       }, resourceParameters.size ? resourceParameters : undefined);
+      const tokenReceivedAt = Math.floor(Date.now() / 1000);
       stage = 'id_token_validation';
       if (!tokens.id_token) throw new Error('Missing ID token.');
 
@@ -167,12 +178,28 @@ export class MiziOidcProvider implements OidcProvider {
           ? readSkillsApi(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, apiFetch, { signal: apiSignal }) : undefined,
       ]);
 
-      // No tokens (including an unsolicited refresh token) escape this method or enter storage.
+      // Only explicitly granted API access may be retained in server-private storage.
+      // The route must separate apiGrant before writing the public identity/session.
+      // ID and refresh tokens are never returned, even if the provider sends them.
+      const scopes = tokens.scope?.split(' ') ?? [];
+      const hasApiPermission = ((attempt.readMemberApi || attempt.readProfileDetails) && scopes.includes('user:profile')) ||
+        (attempt.readSkillsApi && scopes.includes('user:skills'));
+      const expiresIn = tokens.expires_in;
+      const denied = [memberApi, profileDetails, skillsApi].some((result) => result?.status === 'error' &&
+        (result.reason === 'unauthorized' || result.reason === 'forbidden')) ||
+        (skillsApi?.status === 'success' && Boolean(skillsApi.collection?.authorizationFailure));
+      const expiresAt = typeof expiresIn === 'number' && Number.isFinite(expiresIn) && expiresIn >= 1
+        ? tokenReceivedAt + Math.min(Math.floor(expiresIn), API_GRANT_MAX_SECONDS) : 0;
+      const grant = hasApiPermission && !denied && expiresAt > Math.floor(Date.now() / 1000)
+        ? apiGrantSchema.safeParse({ accessToken: tokens.access_token, scope: tokens.scope,
+          subject: claims.sub, issuer: this.settings.issuer, clientId: this.settings.clientId, resources, expiresAt })
+        : undefined;
       return {
         profile,
         ...(memberApi ? { memberApi } : {}),
         ...(profileDetails ? { profileDetails } : {}),
         ...(skillsApi ? { skillsApi } : {}),
+        ...(grant?.success ? { apiGrant: grant.data } : {}),
         verification: {
           issuer: this.settings.issuer, audience: this.settings.clientId, sub: claims.sub,
           algorithm: 'RS256', signature: true, nonce: true, pkce: 'S256', state: true,

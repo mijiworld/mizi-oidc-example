@@ -5,6 +5,8 @@ import { createApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { MemoryStore, SESSION_TTL_SECONDS, type Attempt } from '../src/store.js';
 import type { Identity } from '../src/view-model.js';
+import type { ApiGrant, ApiRefreshResult } from '../src/api-grant.js';
+import { LoginFailure } from '../src/login-error.js';
 
 const base = 'https://demo.example';
 const issuer = 'https://issuer.example';
@@ -23,7 +25,8 @@ function fixture() {
       url.search = new URLSearchParams({ state: attempt.state, nonce: attempt.nonce }).toString();
       return url.href;
     }),
-    complete: vi.fn(async (_callback: URL, _attempt: Attempt) => identity),
+    complete: vi.fn(async (_callback: URL, _attempt: Attempt): Promise<Identity & { apiGrant?: ApiGrant }> => identity),
+    readApis: vi.fn(async (_grant: ApiGrant, _page: 'profile' | 'skills'): Promise<ApiRefreshResult> => ({})),
   };
   const app = createApp(config, store, provider);
   async function begin() {
@@ -102,7 +105,7 @@ describe('browser session and callback boundaries', () => {
   it.each([undefined, 'null', 'https://attacker.example', `${base}/path`])(
     'rejects POST login/logout Origin %s before state changes', async (origin) => {
       const f = fixture();
-      for (const path of ['/login', '/logout', '/connect-profile', '/connect-skills', '/service/goal']) {
+      for (const path of ['/login', '/logout', '/connect-profile', '/connect-skills', '/service/goal', '/refresh-profile', '/refresh-skills']) {
         const response = await f.app.request(`${base}${path}`, {
           method: 'POST', headers: origin ? { Origin: origin } : {},
         });
@@ -348,7 +351,7 @@ describe('optional member API and the demo-owned project board', () => {
     expect(f.provider.complete).toHaveBeenCalledTimes(1);
   });
 
-  it('refreshes requested skills with the profile instead of copying stale snapshots or a previous project', async () => {
+  it('explicitly reconnects requested APIs and preserves the same member project', async () => {
     const f = fixture();
     const skillsApi = { status: 'success' as const, subject: identity.profile.sub,
       endpoint: `${issuer}/v1/me/skills`, fetchedAt: new Date().toISOString(), partial: null,
@@ -368,7 +371,7 @@ describe('optional member API and the demo-owned project board', () => {
     })}`, { headers: { Cookie: `${cookie}; ${binding}` } });
     const current = await f.store.getSession(sessionCookie(completed).split('=')[1]!, Math.floor(Date.now() / 1000));
     expect(current?.skillsApi).toMatchObject({ status: 'error', reason: 'scope_missing' });
-    expect(current?.projectGoal).toBeUndefined();
+    expect(current?.projectGoal).toBe('website');
   });
 
   it('rejects unknown, duplicate and extra form fields without changing the project', async () => {
@@ -444,5 +447,158 @@ describe('AWS HTTP API payload 2.0 adapter', () => {
     expect(success.cookies!.some((cookie) => cookie.startsWith('__Host-mizi_demo_session='))).toBe(true);
     expect(success.cookies!.every((cookie) => cookie.includes('Secure') && cookie.includes('HttpOnly'))).toBe(true);
     expect(f.provider.complete.mock.calls[0]![0].origin).toBe(base);
+  });
+});
+
+describe('API-only refresh with private server credentials', () => {
+  const oldTime = '2026-01-01T00:00:00.000Z';
+  const newTime = '2026-02-01T00:00:00.000Z';
+  const snapshots = {
+    memberApi: { status: 'success' as const, fetchedAt: oldTime,
+      profile: { id: identity.profile.sub, nickname: '기존 닉네임', githubConnected: false } },
+    profileDetails: { status: 'success' as const, subject: identity.profile.sub,
+      endpoint: `${issuer}/v1/me/profile`, fetchedAt: oldTime, partial: false,
+      profile: { bio: '기존 소개', role: null, interests: [] } },
+    skillsApi: { status: 'success' as const, subject: identity.profile.sub,
+      endpoint: `${issuer}/v1/me/skills`, fetchedAt: oldTime, partial: null,
+      items: [], requestedLimit: 20 as const, returnedCount: 0, hasMore: false, truncated: false },
+  };
+  async function signedIn(withGrant = true, grantOffset = 900) {
+    const f = fixture();
+    const grant: ApiGrant = { accessToken: 'private_test_access_token', subject: identity.profile.sub,
+      issuer, clientId: config.clientId, scope: 'openid profile user:profile user:skills',
+      resources: ['/v1/me', '/v1/me/profile', '/v1/me/skills'].map((path) => `${issuer}${path}`),
+      expiresAt: Math.floor(Date.now() / 1000) + grantOffset };
+    f.provider.complete.mockResolvedValueOnce({ ...identity, ...snapshots, ...(withGrant ? { apiGrant: grant } : {}) });
+    const begin = await f.begin();
+    const callback = await f.app.request(begin.callback, { headers: { Cookie: begin.cookie } });
+    const cookie = sessionCookie(callback);
+    const id = cookie.split('=')[1]!;
+    await f.store.setProjectGoal(id, identity.profile.sub, 'assistant', Math.floor(Date.now() / 1000));
+    const before = await f.store.getSession(id, Math.floor(Date.now() / 1000));
+    const post = (page: string) => f.app.request(`${base}/refresh-${page}`, {
+      method: 'POST', headers: { Cookie: cookie, Origin: base },
+    });
+    return { ...f, cookie, id, grant, before, post };
+  }
+  it.each(['profile', 'skills'] as const)('refreshes %s alone, retaining session TTL, board and other page without OAuth', async (page) => {
+    const f = await signedIn();
+    const fresh = { memberApi: { ...snapshots.memberApi, fetchedAt: newTime },
+      profileDetails: { ...snapshots.profileDetails, fetchedAt: newTime },
+      skillsApi: { ...snapshots.skillsApi, fetchedAt: newTime } };
+    // Even unexpected other-page data from a provider is not copied into this refresh.
+    f.provider.readApis.mockResolvedValueOnce(fresh);
+    const response = await f.post(page);
+    expect(response.headers.get('location')).toBe(`${base}/${page}?api_status=updated`);
+    expect(response.headers.getSetCookie()).toHaveLength(0);
+    expect(f.provider.readApis).toHaveBeenCalledExactlyOnceWith(f.grant, page);
+    expect(f.provider.authorizationUrl).toHaveBeenCalledTimes(1);
+    expect(f.provider.complete).toHaveBeenCalledTimes(1);
+    const current = await f.store.getSession(f.id, Math.floor(Date.now() / 1000));
+    expect(current).toMatchObject({ expiresAt: f.before!.expiresAt, projectGoal: 'assistant',
+      memberApi: page === 'profile' ? fresh.memberApi : snapshots.memberApi,
+      profileDetails: page === 'profile' ? fresh.profileDetails : snapshots.profileDetails,
+      skillsApi: page === 'skills' ? fresh.skillsApi : snapshots.skillsApi });
+    const html = await (await f.app.request(response.headers.get('location')!, { headers: { Cookie: f.cookie } })).text();
+    expect(html).toContain(`action="/refresh-${page}"`);
+    expect(html).not.toContain(f.grant.accessToken);
+    expect(JSON.stringify(current)).not.toContain(f.grant.accessToken);
+  });
+  it.each(['profile', 'skills'])('requires login before %s API refresh', async (page) => {
+    const f = fixture();
+    const response = await f.app.request(`${base}/refresh-${page}`, { method: 'POST', headers: { Origin: base } });
+    expect(response.headers.get('location')).toBe(`${base}/?service_error=session_expired`);
+    expect(f.provider.readApis).not.toHaveBeenCalled();
+    expect(f.provider.authorizationUrl).not.toHaveBeenCalled();
+  });
+  it.each([false, true])('offers explicit reconnect for legacy or expired grants (%s), without opening OAuth', async (expired) => {
+    const f = await signedIn(expired, -1);
+    const response = await f.post('profile');
+    expect(response.headers.get('location')).toBe(`${base}/profile?api_status=reconnect_required`);
+    expect(f.provider.readApis).not.toHaveBeenCalled();
+    expect(f.provider.authorizationUrl).toHaveBeenCalledTimes(1);
+    const current = await f.store.getSession(f.id, Math.floor(Date.now() / 1000));
+    expect(current).toMatchObject({ ...snapshots, projectGoal: 'assistant', expiresAt: f.before!.expiresAt });
+    expect(current?.apiAccess).toBeUndefined();
+    const html = await (await f.app.request(response.headers.get('location')!, { headers: { Cookie: f.cookie } })).text();
+    expect(html).toContain('action="/connect-profile"');
+    expect(html).toContain('다시 연결하기');
+  });
+  it.each(['unauthorized', 'forbidden', 'scope_missing'] as const)('clears a rejected credential (%s) and retains old data', async (reason) => {
+    const f = await signedIn();
+    f.provider.readApis.mockResolvedValueOnce({ memberApi: { status: 'error', fetchedAt: newTime, reason },
+      profileDetails: { ...snapshots.profileDetails, fetchedAt: newTime } });
+    expect((await f.post('profile')).headers.get('location')).toContain('reconnect_required');
+    expect(await f.store.getApiGrant(f.id, identity.profile.sub, Math.floor(Date.now() / 1000))).toBeNull();
+    expect(await f.store.getSession(f.id, Math.floor(Date.now() / 1000))).toMatchObject(snapshots);
+  });
+  it('clears a credential rejected after a successful skills page and preserves the prior snapshot', async () => {
+    const f = await signedIn();
+    f.provider.readApis.mockResolvedValueOnce({ skillsApi: { ...snapshots.skillsApi, fetchedAt: newTime,
+      truncated: true, hasMore: true,
+      collection: { pages: 1, startedAt: newTime, stoppedReason: 'upstream_error', duplicateCount: 0, authorizationFailure: 'forbidden' } } });
+    expect((await f.post('skills')).headers.get('location')).toContain('reconnect_required');
+    expect(await f.store.getApiGrant(f.id, identity.profile.sub, Math.floor(Date.now() / 1000))).toBeNull();
+    expect((await f.store.getSession(f.id, Math.floor(Date.now() / 1000)))?.skillsApi).toEqual(snapshots.skillsApi);
+  });
+  it('keeps failed profile fields and their timestamps while saving the successful field', async () => {
+    const f = await signedIn();
+    const fresh = { ...snapshots.memberApi, fetchedAt: newTime };
+    f.provider.readApis.mockResolvedValueOnce({ memberApi: fresh,
+      profileDetails: { status: 'error', subject: identity.profile.sub, endpoint: snapshots.profileDetails.endpoint,
+        fetchedAt: newTime, reason: 'unavailable' } });
+    expect((await f.post('profile')).headers.get('location')).toContain('api_status=partial');
+    expect(await f.store.getSession(f.id, Math.floor(Date.now() / 1000))).toMatchObject({
+      memberApi: fresh, profileDetails: snapshots.profileDetails, skillsApi: snapshots.skillsApi,
+      projectGoal: 'assistant', expiresAt: f.before!.expiresAt });
+  });
+  it('saves a bounded partial skills prefix with its new timestamp', async () => {
+    const f = await signedIn();
+    const fresh = { ...snapshots.skillsApi, fetchedAt: newTime, truncated: true, hasMore: true,
+      collection: { pages: 1, startedAt: newTime, stoppedReason: 'time_limit' as const, duplicateCount: 0 } };
+    f.provider.readApis.mockResolvedValueOnce({ skillsApi: fresh });
+    expect((await f.post('skills')).headers.get('location')).toContain('api_status=partial');
+    expect((await f.store.getSession(f.id, Math.floor(Date.now() / 1000)))?.skillsApi).toEqual(fresh);
+  });
+  it.each(['unavailable', 'invalid_response'] as const)('retains old data and grant on a first-page %s response', async (reason) => {
+    const f = await signedIn();
+    f.provider.readApis.mockResolvedValueOnce({ skillsApi: { status: 'error', subject: identity.profile.sub,
+      endpoint: snapshots.skillsApi.endpoint, fetchedAt: newTime, reason } });
+    expect((await f.post('skills')).headers.get('location')).toContain(`api_status=${reason}`);
+    expect(await f.store.getSession(f.id, Math.floor(Date.now() / 1000))).toEqual(f.before);
+    expect(await f.store.getApiGrant(f.id, identity.profile.sub, Math.floor(Date.now() / 1000))).toEqual(f.grant);
+  });
+  it.each(['provider', 'store-boundary'])('fails closed on a subject mismatch caught at %s', async (boundary) => {
+    const f = await signedIn();
+    if (boundary === 'provider') f.provider.readApis.mockRejectedValueOnce(new LoginFailure('member_api'));
+    else f.provider.readApis.mockResolvedValueOnce({ memberApi: { ...snapshots.memberApi,
+      profile: { ...snapshots.memberApi.profile, id: 'another-member' } } });
+    expect((await f.post('profile')).headers.get('location')).toContain('api_status=invalid_response');
+    expect(await f.store.getApiGrant(f.id, identity.profile.sub, Math.floor(Date.now() / 1000))).toBeNull();
+    expect(await f.store.getSession(f.id, Math.floor(Date.now() / 1000))).toMatchObject(snapshots);
+  });
+  it.each(['logout', 'revoke'])('does not restore data or credentials after an in-flight %s', async (action) => {
+    const f = await signedIn();
+    f.provider.readApis.mockImplementationOnce(async () => {
+      if (action === 'logout') await f.store.deleteSession(f.id);
+      else await f.store.clearApiGrant(f.id, identity.profile.sub, Math.floor(Date.now() / 1000));
+      return { skillsApi: { ...snapshots.skillsApi, fetchedAt: newTime } };
+    });
+    expect((await f.post('skills')).headers.get('location')).toContain('reconnect_required');
+    expect(await f.store.getApiGrant(f.id, identity.profile.sub, Math.floor(Date.now() / 1000))).toBeNull();
+    const current = await f.store.getSession(f.id, Math.floor(Date.now() / 1000));
+    if (action === 'logout') expect(current).toBeNull();
+    else expect(current?.skillsApi).toEqual(snapshots.skillsApi);
+  });
+  it('never logs or renders raw exceptions from an API call', async () => {
+    const f = await signedIn();
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    f.provider.readApis.mockRejectedValueOnce(new Error(f.grant.accessToken));
+    const response = await f.post('skills');
+    expect(response.headers.get('location')).toContain('api_status=unavailable');
+    const html = await (await f.app.request(response.headers.get('location')!, { headers: { Cookie: f.cookie } })).text();
+    expect(html).not.toContain(f.grant.accessToken);
+    expect(errors).not.toHaveBeenCalled();
+    expect(console.warn).not.toHaveBeenCalled();
   });
 });
