@@ -1,4 +1,4 @@
-import { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, DeleteCommand, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { describe, expect, it, vi } from 'vitest';
 import { DynamoStore } from '../src/dynamo-store.js';
 import { loadConfig } from '../src/config.js';
@@ -70,6 +70,20 @@ describe('DynamoDB store enforces expiry and atomic one-time browser binding', (
 });
 
 describe('local store', () => {
+  it('requires matching API identity and an unexpired session for a project update without extending its TTL', async () => {
+    const store = new MemoryStore();
+    const own = { ...session, memberApi: { status: 'success' as const, fetchedAt: new Date().toISOString(),
+      profile: { id: session.profile.sub, nickname: '회원', githubConnected: null } } };
+    await store.putSession('one', own);
+    expect(await store.setProjectGoal('one', 'wrong-member', 'website', now)).toBe(false);
+    expect(await store.setProjectGoal('one', session.profile.sub, 'website', own.expiresAt)).toBe(false);
+    expect(await store.setProjectGoal('one', session.profile.sub, 'assistant', now)).toBe(true);
+    expect(await store.getSession('one', now)).toMatchObject({ projectGoal: 'assistant', expiresAt: own.expiresAt });
+    await store.deleteSession('one');
+    expect(await store.setProjectGoal('one', session.profile.sub, 'website', now)).toBe(false);
+    await expect(store.putSession('bad', { ...own, memberApi: { ...own.memberApi,
+      profile: { ...own.memberApi.profile, id: 'wrong-member' } } })).rejects.toThrow();
+  });
   it('does not consume a mismatched attempt and gives only one concurrent caller the valid attempt', async () => {
     const store = new MemoryStore();
     await store.putAttempt(attempt);
@@ -78,6 +92,20 @@ describe('local store', () => {
     const results = await Promise.all([1, 2].map(() => store.consumeAttempt(attempt.state, attempt.bindingHash, now)));
     expect(results.filter(Boolean)).toHaveLength(1);
   });
+});
+
+it('updates only the own-session project field with atomic expiry and member conditions in DynamoDB', async () => {
+  const f = dynamoFixture();
+  expect(await f.store.setProjectGoal('raw-session', session.profile.sub, 'automation', now)).toBe(true);
+  const command = f.send.mock.calls[0]![0] as UpdateCommand;
+  expect(command).toBeInstanceOf(UpdateCommand);
+  expect(command.input.Key).toEqual({ pk: `session:${digest('raw-session')}` });
+  expect(command.input.UpdateExpression).toBe('SET #goal = :goal');
+  expect(command.input.ConditionExpression).toContain('attribute_exists(pk) AND expiresAt > :now');
+  expect(command.input.ConditionExpression).toContain('#api.#profile.#id = :subject');
+  expect(command.input.ExpressionAttributeValues).toMatchObject({ ':subject': session.profile.sub, ':goal': 'automation', ':now': now });
+  f.send.mockRejectedValueOnce(Object.assign(new Error('expired or removed'), { name: 'ConditionalCheckFailedException' }));
+  expect(await f.store.setProjectGoal('raw-session', session.profile.sub, 'website', now)).toBe(false);
 });
 
 describe('trusted environment configuration', () => {

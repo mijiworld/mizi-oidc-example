@@ -75,7 +75,7 @@ describe('browser session and callback boundaries', () => {
   it.each([undefined, 'null', 'https://attacker.example', `${base}/path`])(
     'rejects POST login/logout Origin %s before state changes', async (origin) => {
       const f = fixture();
-      for (const path of ['/login', '/logout']) {
+      for (const path of ['/login', '/logout', '/connect-profile', '/service/goal']) {
         const response = await f.app.request(`${base}${path}`, {
           method: 'POST', headers: origin ? { Origin: origin } : {},
         });
@@ -184,6 +184,92 @@ describe('browser session and callback boundaries', () => {
     const unexpected = await f.app.request(`${base}/`, { headers: { Cookie: `__Host-mizi_demo_session=${'s'.repeat(43)}` } });
     expect(unexpected.status).toBe(503);
     expect(logger.mock.calls).toEqual([['request_failed']]);
+  });
+});
+
+describe('optional member API and the demo-owned project board', () => {
+  const apiIdentity: Identity = { ...identity, memberApi: {
+    status: 'success', fetchedAt: new Date().toISOString(),
+    profile: { id: identity.profile.sub, nickname: 'API에서 읽은 회원', githubConnected: false },
+  } };
+  async function signIn(f: ReturnType<typeof fixture>, member: Identity = identity, previous?: string) {
+    f.provider.complete.mockResolvedValueOnce(member);
+    const flow = await f.begin();
+    const completed = await f.app.request(flow.callback, {
+      headers: { Cookie: previous ? `${flow.cookie}; ${previous}` : flow.cookie },
+    });
+    return sessionCookie(completed);
+  }
+  const choose = (f: ReturnType<typeof fixture>, cookie: string, body = 'goal=website') => f.app.request(`${base}/service/goal`, {
+    method: 'POST', headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+  });
+
+  it('keeps API access optional and begins an additional consent only for a signed-in session', async () => {
+    const f = fixture();
+    const anonymous = await f.app.request(`${base}/connect-profile`, { method: 'POST', headers: { Origin: base } });
+    expect(anonymous.headers.get('location')).toContain('login_required');
+    expect(f.provider.authorizationUrl).not.toHaveBeenCalled();
+    const cookie = await signIn(f);
+    expect(f.provider.authorizationUrl.mock.calls[0]![0].readMemberApi).toBeUndefined();
+    const response = await f.app.request(`${base}/connect-profile`, { method: 'POST', headers: { Origin: base, Cookie: cookie } });
+    expect(response.status).toBe(303);
+    expect(f.provider.authorizationUrl.mock.calls[1]![0].readMemberApi).toBe(true);
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect((await (await f.app.request(`${base}/client.json`)).json()).scope).toBe('openid profile user:profile');
+  });
+
+  it('stores a project choice only in the authenticated demo session, without another provider call', async () => {
+    const f = fixture();
+    const cookie = await signIn(f, apiIdentity);
+    const id = cookie.split('=')[1]!;
+    const before = await f.store.getSession(id, Math.floor(Date.now() / 1000));
+    const saved = await choose(f, cookie, 'goal=assistant');
+    expect(saved.headers.get('location')).toBe(`${base}/#project-board`);
+    const after = await f.store.getSession(id, Math.floor(Date.now() / 1000));
+    expect(after?.projectGoal).toBe('assistant');
+    expect(after?.expiresAt).toBe(before?.expiresAt);
+    expect(after?.memberApi).toEqual(apiIdentity.memberApi);
+    expect(f.provider.authorizationUrl).toHaveBeenCalledTimes(1);
+    expect(f.provider.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects unknown, duplicate and extra form fields without changing the project', async () => {
+    const f = fixture();
+    const cookie = await signIn(f, apiIdentity);
+    for (const body of ['goal=untrusted', 'goal=website&goal=assistant', 'goal=website&member=other', '']) {
+      expect((await choose(f, cookie, body)).status).toBe(400);
+    }
+    expect((await f.store.getSession(cookie.split('=')[1]!, Math.floor(Date.now() / 1000)))?.projectGoal).toBeUndefined();
+    const oversized = await choose(f, cookie, `goal=${'x'.repeat(2048)}`);
+    expect(oversized.status).toBe(413);
+  });
+
+  it('does not enable a board before API consent/success or after logout', async () => {
+    const f = fixture();
+    for (const member of [identity, { ...identity, memberApi: {
+      status: 'error' as const, fetchedAt: new Date().toISOString(), reason: 'forbidden' as const,
+    } }]) {
+      const cookie = await signIn(f, member);
+      expect((await choose(f, cookie)).headers.get('location')).toContain('profile_required');
+    }
+    const cookie = await signIn(f, apiIdentity);
+    await f.app.request(`${base}/logout`, { method: 'POST', headers: { Origin: base, Cookie: cookie } });
+    expect((await choose(f, cookie)).headers.get('location')).toContain('session_expired');
+  });
+
+  it('replaces account data and drops the old project when another account signs in', async () => {
+    const f = fixture();
+    const oldCookie = await signIn(f, apiIdentity);
+    await choose(f, oldCookie);
+    const other: Identity = { profile: { sub: 'usr_other', nickname: '다른 회원' },
+      verification: { ...identity.verification, sub: 'usr_other' } };
+    const newCookie = await signIn(f, other, oldCookie);
+    const now = Math.floor(Date.now() / 1000);
+    expect(await f.store.getSession(oldCookie.split('=')[1]!, now)).toBeNull();
+    const current = await f.store.getSession(newCookie.split('=')[1]!, now);
+    expect(current?.profile.sub).toBe('usr_other');
+    expect(current?.memberApi).toBeUndefined();
+    expect(current?.projectGoal).toBeUndefined();
   });
 });
 

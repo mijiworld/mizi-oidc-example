@@ -74,6 +74,31 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
 .config { margin-top: 24px; border: 1px solid var(--line); border-radius: 12px; padding: 18px 24px; }
 .config summary { font-size: 13px; color: var(--muted); cursor: pointer; }
 .config .data { margin-top: 16px; }
+.workspace { display: grid; gap: 20px; margin-top: 32px; }
+.stage-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.step-number { display: grid; place-items: center; flex: 0 0 28px; height: 28px; background: var(--green-soft); color: var(--green); border-radius: 50%; font-size: 13px; font-weight: 700; }
+.stage-heading h2 { flex: 1; min-width: 180px; }
+.member-name { margin-top: 18px; font-size: 20px; font-weight: 650; overflow-wrap: anywhere; }
+.member-name span { margin-left: 5px; font-size: 14px; font-weight: 400; color: var(--muted); }
+.stage-status { margin-top: 18px; }
+.member-data { margin-top: 16px; }
+.refresh-form { margin-top: 18px; }
+.developer-note { margin-top: 20px; color: var(--muted); font-size: 12px; }
+.developer-note summary { cursor: pointer; padding: 6px 0; font-size: 13px; }
+.developer-note p { margin-top: 10px; overflow-wrap: anywhere; }
+.developer-note .data { margin-top: 12px; }
+.inline-error { margin-top: 16px; border-radius: 8px; background: var(--red-soft); padding: 14px 16px; font-size: 14px; color: var(--red); overflow-wrap: anywhere; }
+.plan-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 22px; }
+.plan-option { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); color: var(--ink); text-align: left; overflow-wrap: anywhere; }
+.plan-option strong { font-size: 16px; }
+.plan-option span { font-size: 13px; color: var(--muted); }
+.plan-option .plan-action { margin-top: auto; padding-top: 12px; font-weight: 650; color: var(--green); }
+.plan-option:hover, .plan-option.selected { background: var(--green-soft); border-color: var(--green); }
+.project-board { margin-top: 22px; padding: 24px; border-radius: 12px; background: var(--paper); }
+.board-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.board-heading h3 { margin: 0; font-size: 18px; letter-spacing: -.025em; }
+.session-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin-top: 28px; }
+.session-actions .fine { margin: 0; }
 .footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; border-top: 1px solid var(--line); padding: 22px 0 30px; color: var(--muted); font-size: 12px; }
 @media (max-width: 720px) {
   .wrap { width: calc(100% - 40px); }
@@ -86,6 +111,13 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size
   .grid { grid-template-columns: 1fr; gap: 18px; margin-top: 28px; }
   .card { padding: 25px 22px; border-radius: 14px; }
   .config { padding: 16px 20px; }
+  .stage-heading h2 { font-size: 18px; }
+  .plan-grid { grid-template-columns: 1fr; }
+  .plan-option { padding: 18px; }
+  .plan-option .plan-action { padding-top: 4px; }
+  .project-board { padding: 20px 16px; }
+  .session-actions { display: block; }
+  .session-actions .fine { margin-top: 10px; }
   .footer { display: block; }
   .footer p + p { margin-top: 6px; }
 }

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Identity } from './view-model.js';
+import { memberApiResultSchema, projectGoalSchema, type ProjectGoal } from './service.js';
 
 export const ATTEMPT_TTL_SECONDS = 600;
 export const SESSION_TTL_SECONDS = 1800;
@@ -12,19 +13,25 @@ export const attemptSchema = z.object({
   codeVerifier: opaqueSchema,
   bindingHash: z.string().regex(/^[a-f0-9]{64}$/),
   expiresAt: z.number().int().positive(),
+  readMemberApi: z.boolean().optional(),
 });
 export type Attempt = z.infer<typeof attemptSchema>;
-export interface Session extends Identity { expiresAt: number }
+export interface Session extends Identity { expiresAt: number; projectGoal?: ProjectGoal }
 export const sessionSchema: z.ZodType<Session> = z.object({
   expiresAt: z.number().int().positive(),
   profile: z.object({ sub: z.string().min(1), nickname: z.string().optional() }),
+  memberApi: memberApiResultSchema.optional(),
+  projectGoal: projectGoalSchema.optional(),
   verification: z.object({
     issuer: z.string(), audience: z.string(), sub: z.string().min(1), algorithm: z.literal('RS256'),
     nonce: z.literal(true), pkce: z.literal('S256'), state: z.literal(true), issuerResponse: z.literal(true),
     signature: z.literal(true), userInfoSubject: z.literal(true),
     authenticatedAt: z.iso.datetime(), checkedAt: z.iso.datetime(),
   }),
-});
+}).refine((session) => !session.memberApi || session.memberApi.status !== 'success' ||
+  session.memberApi.profile.id === session.profile.sub, 'Member API identity mismatch.')
+  .refine((session) => !session.projectGoal || session.memberApi?.status === 'success',
+    'Project board requires a successful member API response.');
 
 export interface Store {
   putAttempt(attempt: Attempt): Promise<void>;
@@ -33,6 +40,7 @@ export interface Store {
   putSession(id: string, session: Session): Promise<void>;
   getSession(id: string, now: number): Promise<Session | null>;
   deleteSession(id: string): Promise<void>;
+  setProjectGoal(id: string, subject: string, goal: ProjectGoal, now: number): Promise<boolean>;
 }
 
 /** Development only. Production must use a shared store across Lambda instances. */
@@ -62,6 +70,13 @@ export class MemoryStore implements Store {
     return value && value.expiresAt > now ? structuredClone(value) : null;
   }
   async deleteSession(id: string): Promise<void> { this.sessions.delete(digest(id)); }
+  async setProjectGoal(id: string, subject: string, goal: ProjectGoal, now: number): Promise<boolean> {
+    const value = this.sessions.get(digest(id));
+    if (!value || value.expiresAt <= now || value.profile.sub !== subject ||
+        value.memberApi?.status !== 'success' || value.memberApi.profile.id !== subject) return false;
+    value.projectGoal = projectGoalSchema.parse(goal);
+    return true;
+  }
   private cleanExpired(): void {
     const now = Math.floor(Date.now() / 1000);
     for (const [key, item] of this.attempts) if (item.expiresAt <= now) this.attempts.delete(key);

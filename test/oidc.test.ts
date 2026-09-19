@@ -30,6 +30,7 @@ function callback(query: Record<string, string | undefined> = {}) {
 async function fixture(options: {
   claims?: JWTPayload; wrongSignature?: boolean; omitIdToken?: boolean; profileSub?: string; algorithm?: 'HS256';
   discoveryIssuer?: string; tokenFailure?: boolean; tokenEndpoint?: string;
+  tokenScope?: string | null; memberProfile?: unknown; memberStatus?: number; memberUnavailable?: boolean;
 } = {}) {
   const calls: { url: string; init?: RequestInit }[] = [];
   const jwk = await exportJWK(keys.publicKey);
@@ -62,11 +63,18 @@ async function fixture(options: {
       const idToken = await new SignJWT(payload).setProtectedHeader({ alg: options.algorithm ?? 'RS256', kid: 'test-rsa' })
         .sign(options.algorithm === 'HS256' ? randomBytes(32) : (options.wrongSignature ? wrongKeys : keys).privateKey);
       return Response.json({ access_token: access, refresh_token: refresh, token_type: 'Bearer',
-        expires_in: 3600, scope: 'openid profile', ...(options.omitIdToken ? {} : { id_token: idToken }) });
+        expires_in: 3600, ...(options.tokenScope === null ? {} : { scope: options.tokenScope ?? 'openid profile' }),
+        ...(options.omitIdToken ? {} : { id_token: idToken }) });
     }
     if (url === `${issuer}/userinfo`) {
       expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${access}`);
       return Response.json({ sub: options.profileSub ?? 'usr_verified', nickname: '검증한 회원', email: 'not-stored@example.test' });
+    }
+    if (url === `${issuer}/v1/me`) {
+      expect(new Headers(init?.headers).get('authorization')).toBe(`Bearer ${access}`);
+      if (options.memberUnavailable) throw new Error(`do not expose ${access}`);
+      return Response.json(options.memberProfile ?? { id: 'usr_verified', nickname: 'API 회원', github_connected: true, email: 'api-private@example.test' },
+        { status: options.memberStatus ?? 200 });
     }
     throw new Error('Unexpected test request.');
   });
@@ -85,12 +93,16 @@ describe('real OIDC library and independent RS256 verification', () => {
       code_challenge: createHash('sha256').update(attempt.codeVerifier).digest('base64url'),
     });
     expect(auth.searchParams.has('client_secret')).toBe(false);
+    expect(auth.searchParams.has('resource')).toBe(false);
   });
 
   it('verifies all bindings and UserInfo before returning only profile and verification data', async () => {
     const f = await fixture();
     const result = await f.provider.complete(callback(), attempt);
     expect(result.profile).toEqual({ sub: 'usr_verified', nickname: '검증한 회원' });
+    expect(result).not.toHaveProperty('memberApi');
+    const tokenCall = f.calls.find((call) => call.url === `${issuer}/token`)!;
+    expect(new URLSearchParams(String(tokenCall.init?.body)).has('resource')).toBe(false);
     expect(result.verification).toMatchObject({ issuer, audience: clientId, sub: 'usr_verified',
       signature: true, algorithm: 'RS256', nonce: true, pkce: 'S256', state: true,
       issuerResponse: true, userInfoSubject: true });
@@ -104,6 +116,61 @@ describe('real OIDC library and independent RS256 verification', () => {
     for (const call of f.calls) {
       expect(call.init?.signal).toBeInstanceOf(AbortSignal);
       expect(call.init?.redirect).toBe('error');
+    }
+  });
+
+
+  it('requests member scope/resource only for an explicit API attempt, and calls /me after identity validation', async () => {
+    const apiAttempt: Attempt = { ...attempt, readMemberApi: true };
+    const f = await fixture({ tokenScope: 'openid profile user:profile' });
+    const auth = new URL(await f.provider.authorizationUrl(apiAttempt));
+    expect(auth.searchParams.get('scope')).toBe('openid profile user:profile');
+    expect(auth.searchParams.get('resource')).toBe(`${issuer}/v1/me`);
+    const result = await f.provider.complete(callback(), apiAttempt);
+    expect(result.profile.sub).toBe('usr_verified');
+    expect(result.memberApi).toMatchObject({ status: 'success',
+      profile: { id: 'usr_verified', nickname: 'API 회원', githubConnected: true } });
+    expect(f.calls.map((call) => call.url)).toEqual([
+      `${issuer}/.well-known/openid-configuration`, `${issuer}/token`, `${issuer}/jwks`, `${issuer}/userinfo`, `${issuer}/v1/me`,
+    ]);
+    const tokenCall = f.calls.find((call) => call.url === `${issuer}/token`)!;
+    expect(new URLSearchParams(String(tokenCall.init?.body)).getAll('resource')).toEqual([`${issuer}/v1/me`]);
+    const serialized = JSON.stringify(result);
+    for (const sensitive of [access, refresh, 'api-private@example.test', 'id_token', 'access_token', 'refresh_token']) {
+      expect(serialized).not.toContain(sensitive);
+    }
+  });
+
+  it.each([
+    ['scope_missing', { tokenScope: 'openid profile' }],
+    ['scope_missing', { tokenScope: null }],
+    ['unauthorized', { memberStatus: 401 }],
+    ['forbidden', { memberStatus: 403 }],
+    ['invalid_response', { memberProfile: { id: 'usr_verified' } }],
+    ['unavailable', { memberUnavailable: true }],
+  ] as const)('keeps the verified OIDC identity but reports optional API error %s', async (reason, options) => {
+    const f = await fixture({ tokenScope: 'openid profile user:profile', ...options });
+    const result = await f.provider.complete(callback(), { ...attempt, readMemberApi: true });
+    expect(result.profile.sub).toBe('usr_verified');
+    expect(result.verification.signature).toBe(true);
+    expect(result.memberApi).toMatchObject({ status: 'error', reason });
+    expect(result.memberApi).not.toHaveProperty('profile');
+    if (reason === 'scope_missing') expect(f.calls.some((call) => call.url.endsWith('/v1/me'))).toBe(false);
+    expect(JSON.stringify(result)).not.toContain(access);
+  });
+
+  it('fails the entire new login when the member API returns a different verified subject', async () => {
+    const f = await fixture({ tokenScope: 'openid profile user:profile',
+      memberProfile: { id: 'usr_other', nickname: '다른 회원', github_connected: false } });
+    await expect(f.provider.complete(callback(), { ...attempt, readMemberApi: true }))
+      .rejects.toMatchObject({ name: 'LoginFailure', stage: 'member_api' });
+  });
+
+  it('never calls the optional API if ID token or UserInfo verification fails', async () => {
+    for (const options of [{ wrongSignature: true }, { profileSub: 'usr_other' }]) {
+      const f = await fixture({ tokenScope: 'openid profile user:profile', ...options });
+      await expect(f.provider.complete(callback(), { ...attempt, readMemberApi: true })).rejects.toThrow();
+      expect(f.calls.some((call) => call.url.endsWith('/v1/me'))).toBe(false);
     }
   });
 
