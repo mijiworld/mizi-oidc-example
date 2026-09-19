@@ -125,7 +125,7 @@ describe("server-rendered OIDC demo", () => {
     const html = renderHome({ ...verified, projectGoal: "website" });
     expect(html).toContain("서버 검증 완료");
     expect(html).toContain('action="/connect-profile" method="post"');
-    expect(html).toContain("미지 프로필 연결하기");
+    expect(html).toContain("내 미지 정보 가져오기");
     expect(html).toContain("user:profile");
     expect(html).toContain("GET /v1/me");
     expect(html).not.toContain("회원 API 조회 완료");
