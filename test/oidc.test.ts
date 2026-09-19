@@ -31,6 +31,7 @@ async function fixture(options: {
   claims?: JWTPayload; wrongSignature?: boolean; omitIdToken?: boolean; profileSub?: string; algorithm?: 'HS256';
   discoveryIssuer?: string; tokenFailure?: boolean; tokenEndpoint?: string;
   tokenScope?: string | null; memberProfile?: unknown; memberStatus?: number; memberUnavailable?: boolean;
+  detailsProfile?: unknown; skillsBody?: unknown;
 } = {}) {
   const calls: { url: string; init?: RequestInit }[] = [];
   const jwk = await exportJWK(keys.publicKey);
@@ -76,6 +77,15 @@ async function fixture(options: {
       return Response.json(options.memberProfile ?? { id: 'usr_verified', nickname: 'API 회원', github_connected: true, email: 'api-private@example.test' },
         { status: options.memberStatus ?? 200 });
     }
+    if (url === `${issuer}/v1/me/profile`) return Response.json(options.detailsProfile ?? {
+      user: { id: 'usr_verified', role: '개발자' }, bio: '작은 도구를 만들어요.', interests: ['웹'], partial: false,
+      location: 'not-retained-location', contact_method: 'not-retained-contact',
+    });
+    if (url === `${issuer}/v1/me/skills?limit=20`) return Response.json(options.skillsBody ?? {
+      items: [{ id: 'skill_1', name: 'TypeScript', source: 'github_analysis', visible: true,
+        verification_method: 'github_analysis', verified_by: 'MiZi', verified_at: '2026-09-19T00:00:00.000Z',
+        visibility: { profile: true, skills: true } }], next_cursor: null,
+    });
     throw new Error('Unexpected test request.');
   });
   return { provider: new MiziOidcProvider(settings, fetcher), calls };
@@ -159,6 +169,41 @@ describe('real OIDC library and independent RS256 verification', () => {
     expect(JSON.stringify(result)).not.toContain(access);
   });
 
+  it('uses all requested API resources at both OAuth boundaries and returns minimal per-API snapshots', async () => {
+    const f = await fixture({ tokenScope: 'openid profile user:profile user:skills' });
+    const requested = { ...attempt, readMemberApi: true, readProfileDetails: true, readSkillsApi: true };
+    const resources = [`${issuer}/v1/me`, `${issuer}/v1/me/profile`, `${issuer}/v1/me/skills`];
+    const auth = new URL(await f.provider.authorizationUrl(requested));
+    expect(auth.searchParams.get('scope')).toBe('openid profile user:profile user:skills');
+    expect(auth.searchParams.getAll('resource')).toEqual(resources);
+    const result = await f.provider.complete(callback(), requested);
+    const tokenCall = f.calls.find((call) => call.url === `${issuer}/token`)!;
+    expect(new URLSearchParams(String(tokenCall.init?.body)).getAll('resource')).toEqual(resources);
+    expect(result.profileDetails).toMatchObject({ status: 'success', subject: 'usr_verified',
+      profile: { role: '개발자', bio: '작은 도구를 만들어요.', interests: ['웹'] } });
+    expect(result.skillsApi).toMatchObject({ status: 'success', subject: 'usr_verified',
+      items: [{ name: 'TypeScript', source: 'github_analysis', verifiedBy: 'MiZi' }] });
+    const serialized = JSON.stringify(result);
+    for (const sensitive of [access, refresh, 'not-retained-contact', 'not-retained-location']) expect(serialized).not.toContain(sensitive);
+  });
+
+  it('keeps profile details when skills permission is declined, without calling the skills API', async () => {
+    const f = await fixture({ tokenScope: 'openid profile user:profile' });
+    const result = await f.provider.complete(callback(), {
+      ...attempt, readMemberApi: true, readProfileDetails: true, readSkillsApi: true,
+    });
+    expect(result.profileDetails?.status).toBe('success');
+    expect(result.skillsApi).toMatchObject({ status: 'error', reason: 'scope_missing' });
+    expect(f.calls.some((call) => call.url.includes('/me/skills'))).toBe(false);
+  });
+
+  it('rejects a profile-details identity mismatch even when the basic member response matches', async () => {
+    const f = await fixture({ tokenScope: 'openid profile user:profile',
+      detailsProfile: { user: { id: 'another-user', role: null }, bio: null, interests: [], partial: false } });
+    await expect(f.provider.complete(callback(), { ...attempt, readMemberApi: true, readProfileDetails: true }))
+      .rejects.toMatchObject({ name: 'LoginFailure', stage: 'member_api' });
+  });
+
   it('fails the entire new login when the member API returns a different verified subject', async () => {
     const f = await fixture({ tokenScope: 'openid profile user:profile',
       memberProfile: { id: 'usr_other', nickname: '다른 회원', github_connected: false } });
@@ -169,8 +214,9 @@ describe('real OIDC library and independent RS256 verification', () => {
   it('never calls the optional API if ID token or UserInfo verification fails', async () => {
     for (const options of [{ wrongSignature: true }, { profileSub: 'usr_other' }]) {
       const f = await fixture({ tokenScope: 'openid profile user:profile', ...options });
-      await expect(f.provider.complete(callback(), { ...attempt, readMemberApi: true })).rejects.toThrow();
+      await expect(f.provider.complete(callback(), { ...attempt, readMemberApi: true, readProfileDetails: true, readSkillsApi: true })).rejects.toThrow();
       expect(f.calls.some((call) => call.url.endsWith('/v1/me'))).toBe(false);
+      expect(f.calls.some((call) => call.url.includes('/v1/me/'))).toBe(false);
     }
   });
 

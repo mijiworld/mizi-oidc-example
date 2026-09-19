@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Identity } from './view-model.js';
 import { memberApiResultSchema, projectGoalSchema, type ProjectGoal } from './service.js';
+import { profileDetailsResultSchema, skillsApiResultSchema } from './extra-api-model.js';
 
 export const ATTEMPT_TTL_SECONDS = 600;
 export const SESSION_TTL_SECONDS = 1800;
@@ -14,6 +15,9 @@ export const attemptSchema = z.object({
   bindingHash: z.string().regex(/^[a-f0-9]{64}$/),
   expiresAt: z.number().int().positive(),
   readMemberApi: z.boolean().optional(),
+  readProfileDetails: z.boolean().optional(),
+  readSkillsApi: z.boolean().optional(),
+  returnPage: z.enum(['profile', 'skills']).optional(),
 });
 export type Attempt = z.infer<typeof attemptSchema>;
 export interface Session extends Identity { expiresAt: number; projectGoal?: ProjectGoal }
@@ -21,6 +25,8 @@ export const sessionSchema: z.ZodType<Session> = z.object({
   expiresAt: z.number().int().positive(),
   profile: z.object({ sub: z.string().min(1), nickname: z.string().optional() }),
   memberApi: memberApiResultSchema.optional(),
+  profileDetails: profileDetailsResultSchema.optional(),
+  skillsApi: skillsApiResultSchema.optional(),
   projectGoal: projectGoalSchema.optional(),
   verification: z.object({
     issuer: z.string(), audience: z.string(), sub: z.string().min(1), algorithm: z.literal('RS256'),
@@ -30,6 +36,10 @@ export const sessionSchema: z.ZodType<Session> = z.object({
   }),
 }).refine((session) => !session.memberApi || session.memberApi.status !== 'success' ||
   session.memberApi.profile.id === session.profile.sub, 'Member API identity mismatch.')
+  .refine((session) => !session.profileDetails || session.profileDetails.subject === session.profile.sub,
+    'Profile details identity mismatch.')
+  .refine((session) => !session.skillsApi || session.skillsApi.subject === session.profile.sub,
+    'Skills API identity mismatch.')
   .refine((session) => !session.projectGoal || session.memberApi?.status === 'success',
     'Project board requires a successful member API response.');
 

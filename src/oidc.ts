@@ -7,6 +7,7 @@ import type { Attempt } from './store.js';
 import type { Identity } from './view-model.js';
 import { LoginFailure, type LoginStage } from './login-error.js';
 import { memberApiResource, readMemberApi } from './member-api.js';
+import { profileDetailsResource, skillsApiResource, readProfileDetails, readSkillsApi } from './extra-api.js';
 
 export interface OidcProvider {
   authorizationUrl(attempt: Attempt): Promise<string>;
@@ -25,6 +26,15 @@ const equal = (a: string, b: string): boolean => {
   const right = Buffer.from(b);
   return left.length === right.length && timingSafeEqual(left, right);
 };
+
+/** Use the same fixed resource list at authorization and code exchange. */
+function apiResources(issuer: string, attempt: Attempt): string[] {
+  return [
+    ...(attempt.readMemberApi ? [memberApiResource(issuer)] : []),
+    ...(attempt.readProfileDetails ? [profileDetailsResource(issuer)] : []),
+    ...(attempt.readSkillsApi ? [skillsApiResource(issuer)] : []),
+  ];
+}
 
 /** Never use callback parameters or the request Host to choose an issuer or endpoint. */
 export class MiziOidcProvider implements OidcProvider {
@@ -79,14 +89,17 @@ export class MiziOidcProvider implements OidcProvider {
 
   async authorizationUrl(attempt: Attempt): Promise<string> {
     const configuration = await this.configuration();
-    return client.buildAuthorizationUrl(configuration, {
+    const parameters = new URLSearchParams({
       redirect_uri: this.settings.callbackUrl,
-      scope: attempt.readMemberApi ? 'openid profile user:profile' : 'openid profile', response_type: 'code',
-      ...(attempt.readMemberApi ? { resource: memberApiResource(this.settings.issuer) } : {}),
+      scope: ['openid', 'profile',
+        ...(attempt.readMemberApi || attempt.readProfileDetails ? ['user:profile'] : []),
+        ...(attempt.readSkillsApi ? ['user:skills'] : [])].join(' '), response_type: 'code',
       state: attempt.state, nonce: attempt.nonce,
       code_challenge: await client.calculatePKCECodeChallenge(attempt.codeVerifier),
       code_challenge_method: 'S256',
-    }).href;
+    });
+    for (const resource of apiResources(this.settings.issuer, attempt)) parameters.append('resource', resource);
+    return client.buildAuthorizationUrl(configuration, parameters).href;
   }
 
   async complete(callback: URL, attempt: Attempt): Promise<Identity> {
@@ -105,10 +118,12 @@ export class MiziOidcProvider implements OidcProvider {
       stage = 'discovery';
       const configuration = await this.configuration();
       stage = 'token_exchange';
+      const resourceParameters = new URLSearchParams();
+      for (const resource of apiResources(this.settings.issuer, attempt)) resourceParameters.append('resource', resource);
       const tokens = await client.authorizationCodeGrant(configuration, callback, {
         expectedState: attempt.state, expectedNonce: attempt.nonce,
         pkceCodeVerifier: attempt.codeVerifier, idTokenExpected: true,
-      }, attempt.readMemberApi ? { resource: memberApiResource(this.settings.issuer) } : undefined);
+      }, resourceParameters.size ? resourceParameters : undefined);
       stage = 'id_token_validation';
       if (!tokens.id_token) throw new Error('Missing ID token.');
 
@@ -136,14 +151,21 @@ export class MiziOidcProvider implements OidcProvider {
       const profile = profileSchema.parse(await client.fetchUserInfo(configuration, tokens.access_token, claims.sub));
       if (profile.sub !== claims.sub) throw new Error('UserInfo subject mismatch.');
       stage = 'member_api';
-      const memberApi = attempt.readMemberApi
-        ? await readMemberApi(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, this.fetcher)
-        : undefined;
+      const [memberApi, profileDetails, skillsApi] = await Promise.all([
+        attempt.readMemberApi
+          ? readMemberApi(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, this.fetcher) : undefined,
+        attempt.readProfileDetails
+          ? readProfileDetails(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, this.fetcher) : undefined,
+        attempt.readSkillsApi
+          ? readSkillsApi(this.settings.issuer, tokens.access_token, tokens.scope, claims.sub, this.fetcher) : undefined,
+      ]);
 
       // No tokens (including an unsolicited refresh token) escape this method or enter storage.
       return {
         profile,
         ...(memberApi ? { memberApi } : {}),
+        ...(profileDetails ? { profileDetails } : {}),
+        ...(skillsApi ? { skillsApi } : {}),
         verification: {
           issuer: this.settings.issuer, audience: this.settings.clientId, sub: claims.sub,
           algorithm: 'RS256', signature: true, nonce: true, pkce: 'S256', state: true,

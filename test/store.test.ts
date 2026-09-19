@@ -70,6 +70,32 @@ describe('DynamoDB store enforces expiry and atomic one-time browser binding', (
 });
 
 describe('local store', () => {
+  it('keeps API snapshots bound to the session subject and accepts sessions created before extra APIs existed', async () => {
+    const store = new MemoryStore();
+    await store.putSession('old', session);
+    expect(await store.getSession('old', now)).toEqual(session);
+    const profileDetails = { status: 'success' as const, subject: session.profile.sub,
+      endpoint: 'https://issuer.example/v1/me/profile', fetchedAt: new Date().toISOString(), partial: false,
+      profile: { bio: '소개', role: null, interests: [] } };
+    const skillsApi = { status: 'success' as const, subject: session.profile.sub,
+      endpoint: 'https://issuer.example/v1/me/skills', fetchedAt: new Date().toISOString(), partial: null,
+      items: [], requestedLimit: 20 as const, returnedCount: 0, hasMore: false, truncated: false };
+    await store.putSession('new', { ...session, profileDetails, skillsApi });
+    expect(await store.getSession('new', now)).toMatchObject({ profileDetails, skillsApi });
+    await expect(store.putSession('bad-profile', { ...session,
+      profileDetails: { ...profileDetails, subject: 'other-user' } })).rejects.toThrow();
+    await expect(store.putSession('bad-skills', { ...session,
+      skillsApi: { ...skillsApi, subject: 'other-user' } })).rejects.toThrow();
+  });
+
+  it('stores only fixed local return pages for optional API attempts', async () => {
+    const store = new MemoryStore();
+    await expect(store.putAttempt({ ...attempt, returnPage: 'https://attacker.example' } as unknown as Attempt)).rejects.toThrow();
+    const selected: Attempt = { ...attempt, returnPage: 'skills', readMemberApi: true, readProfileDetails: true, readSkillsApi: true };
+    await store.putAttempt(selected);
+    expect(await store.consumeAttempt(attempt.state, attempt.bindingHash, now)).toEqual(selected);
+  });
+
   it('requires matching API identity and an unexpired session for a project update without extending its TTL', async () => {
     const store = new MemoryStore();
     const own = { ...session, memberApi: { status: 'success' as const, fetchedAt: new Date().toISOString(),
