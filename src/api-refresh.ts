@@ -14,23 +14,36 @@ function memberWithinBudget(operation: Promise<MemberApiResult>, signal: AbortSi
   });
 }
 
-/** Reuse an existing grant for fixed read-only APIs; never invoke OAuth or refresh tokens. */
+/** Check the stored binding before either using or renewing server-only credentials. */
+export function validateApiGrant(
+  settings: Pick<Config, 'issuer' | 'clientId'>,
+  input: ApiGrant,
+): ApiGrant {
+  const parsed = apiGrantSchema.safeParse(input);
+  if (!parsed.success) throw new ApiGrantUnavailable('invalid_grant');
+  const grant = parsed.data;
+  if (grant.issuer !== settings.issuer || grant.clientId !== settings.clientId) throw new ApiGrantUnavailable('invalid_grant');
+  const member = memberApiResource(settings.issuer);
+  const profile = profileDetailsResource(settings.issuer);
+  const skills = skillsApiResource(settings.issuer);
+  const allowed = [member, profile, skills];
+  if (grant.resources.some((resource) => !allowed.includes(resource))) throw new ApiGrantUnavailable('invalid_grant');
+  return grant;
+}
+
+/** Read fixed APIs with a usable access token; renewal is a separate, serialized operation. */
 export async function refreshApis(
   settings: Pick<Config, 'issuer' | 'clientId'>,
   input: ApiGrant,
   page: ApiRefreshPage,
   fetcher: typeof fetch = fetch,
 ): Promise<ApiRefreshResult> {
-  const parsed = apiGrantSchema.safeParse(input);
-  if (!parsed.success || !['profile', 'skills'].includes(page)) throw new ApiGrantUnavailable('invalid_grant');
-  const grant = parsed.data;
-  if (grant.issuer !== settings.issuer || grant.clientId !== settings.clientId) throw new ApiGrantUnavailable('invalid_grant');
+  const grant = validateApiGrant(settings, input);
+  if (!['profile', 'skills'].includes(page)) throw new ApiGrantUnavailable('invalid_grant');
   if (grant.expiresAt <= Math.floor(Date.now() / 1000)) throw new ApiGrantUnavailable('expired');
   const member = memberApiResource(settings.issuer);
   const profile = profileDetailsResource(settings.issuer);
   const skills = skillsApiResource(settings.issuer);
-  const allowed = [member, profile, skills];
-  if (grant.resources.some((resource) => !allowed.includes(resource))) throw new ApiGrantUnavailable('invalid_grant');
   const requiredScope = page === 'profile' ? 'user:profile' : 'user:skills';
   if (!grant.scope.split(' ').includes(requiredScope)) throw new ApiGrantUnavailable('scope_missing');
   const requiredResources = page === 'profile' ? [member, profile] : [skills];

@@ -4,8 +4,12 @@ import { memberApiResultSchema } from './service.js';
 import { profileDetailsResultSchema, skillsApiResultSchema } from './extra-api-model.js';
 
 /** Non-secret capability information; the access token never enters the view model. */
-export const apiAccessSchema = apiGrantSchema.pick({ scope: true, resources: true, expiresAt: true });
+export const apiAccessSchema = apiGrantSchema.pick({ scope: true, resources: true, expiresAt: true })
+  .extend({ renewable: z.literal(true).optional() });
 export type ApiAccess = z.infer<typeof apiAccessSchema>;
+export const publicApiAccess = (grant: ApiGrant): ApiAccess => apiAccessSchema.parse({
+  ...grant, ...(grant.refreshToken ? { renewable: true } : {}),
+});
 export const privateApiRecordSchema = z.object({
   expiresAt: z.number().int().positive(), profile: z.object({ sub: z.string().min(1) }), apiGrant: apiGrantSchema,
 });

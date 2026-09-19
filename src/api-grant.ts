@@ -2,7 +2,8 @@ import { z } from 'zod';
 import type { MemberApiResult } from './service.js';
 import type { ProfileDetailsResult, SkillsApiResult } from './extra-api-model.js';
 
-export const API_GRANT_MAX_SECONDS = 1800;
+export const API_GRANT_MAX_SECONDS = 3600;
+const credential = z.string().min(1).max(2048).regex(/^[A-Za-z0-9._~+/-]+=*$/);
 const httpsUrl = z.url().max(2048).refine((value) => {
   const url = new URL(value);
   return url.protocol === 'https:' && !url.username && !url.password && !url.hash;
@@ -10,7 +11,8 @@ const httpsUrl = z.url().max(2048).refine((value) => {
 
 /** Server-only credentials. Never spread this value into a view or public session. */
 export const apiGrantSchema = z.object({
-  accessToken: z.string().min(1).max(2048).regex(/^[A-Za-z0-9._~+/-]+=*$/),
+  accessToken: credential,
+  refreshToken: credential.optional(),
   scope: z.string().min(1).max(2048).regex(/^[\x21\x23-\x5B\x5D-\x7E]+(?: [\x21\x23-\x5B\x5D-\x7E]+)*$/),
   subject: z.string().min(1).max(255),
   issuer: httpsUrl,
@@ -31,5 +33,13 @@ export class ApiGrantUnavailable extends Error {
   constructor(readonly reason: 'expired' | 'scope_missing' | 'resource_missing' | 'invalid_grant') {
     super('A new API connection is required.');
     this.name = 'ApiGrantUnavailable';
+  }
+}
+
+/** No provider messages or credentials: callers decide whether to keep or discard a grant. */
+export class ApiGrantRefreshFailure extends Error {
+  constructor(readonly reason: 'invalid_grant' | 'invalid_response' | 'unavailable' | 'ambiguous') {
+    super('The API connection could not be refreshed.');
+    this.name = 'ApiGrantRefreshFailure';
   }
 }

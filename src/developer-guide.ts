@@ -41,7 +41,7 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
       <div class="dg-links"><a href="/">데모 홈으로 돌아가기</a>${link(`${SOURCE}#quickstart`, 'GitHub에서 시작하기')}${link(GUIDE, '미지 OIDC 가이드')}${link(discovery, '현재 Discovery 보기')}</div>
     </div>
     <nav class="dg-toc" aria-label="API 가이드 목차"><strong>필요한 부분부터 읽기</strong><ol>
-      <li><a href="#dg-start">시작하기</a></li><li><a href="#dg-auth">로그인과 권한</a></li><li><a href="#dg-api">API 규격</a></li>
+      <li><a href="#dg-start">시작하기</a></li><li><a href="#dg-auth">로그인과 권한</a></li><li><a href="#dg-session">로그인 유지 정책</a></li><li><a href="#dg-api">API 규격</a></li>
       <li><a href="#dg-fetch">서버 호출 예제</a></li><li><a href="#dg-pagination">스킬 페이지 조회</a></li><li><a href="#dg-errors">오류와 저장 정책</a></li><li><a href="#dg-source">실제 코드</a></li>
     </ol></nav>
 
@@ -70,10 +70,10 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
         <tr><td><code>user:skills</code></td><td>내 스킬 API 읽기</td><td>미지 고유 범위</td></tr>
       </tbody></table></div>
       <p class="dg-note"><code>profile</code>과 <code>user:profile</code>은 다릅니다. <code>openid profile</code>로 로그인했다고 회원 API까지 허용된 것은 아닙니다.</p>
-      <p>한 번 연결한 뒤에는 <strong>다시 가져오기</strong>로 같은 화면의 정보만 새로 읽습니다. 미지 로그인 화면으로 이동하지 않으며 프로젝트 선택도 유지합니다. 연결이 없거나 만료된 경우에는 <strong>다시 연결하기</strong>를 직접 선택해 미지에서 권한을 확인합니다.</p>
+      <p>한 번 연결한 뒤에는 <strong>다시 가져오기</strong>로 같은 화면의 정보만 새로 읽습니다. 접근 토큰 갱신이 필요하면 서버에서 처리하며 프로젝트 선택도 유지합니다. 연결이 없거나 권한이 취소된 경우에는 <strong>다시 연결하기</strong>를 직접 선택합니다. 자동으로 미지 로그인 화면을 열지는 않습니다.</p>
       <details class="dg-detail"><summary>인가 요청과 코드 교환에 넣는 값</summary>
         <p>아래는 스킬까지 읽을 때의 주요 매개변수입니다. 실제 전송에는 URL 인코딩을 적용합니다. 첫 로그인에는 <code>openid profile</code>만 요청하고, 추가 API 권한은 사용자가 가져오기를 선택할 때 요청합니다.</p>
-        ${code('인가 요청 매개변수 · URL 인코딩 전 설명용', `response_type=code\nclient_id=${model.clientId}\nredirect_uri=${callback}\nscope=openid profile user:profile user:skills\ncode_challenge=<S256으로 계산한 PKCE challenge>\ncode_challenge_method=S256\nstate=<브라우저에 결합한 일회용 state>\nnonce=<일회용 nonce>\n${resources.map((resource) => `resource=${resource}`).join('\n')}`)}
+        ${code('인가 요청 매개변수 · URL 인코딩 전 설명용', `response_type=code\nclient_id=${model.clientId}\nredirect_uri=${callback}\nscope=openid profile user:profile user:skills\nmax_age=7776000\ncode_challenge=<S256으로 계산한 PKCE challenge>\ncode_challenge_method=S256\nstate=<브라우저에 결합한 일회용 state>\nnonce=<일회용 nonce>\n${resources.map((resource) => `resource=${resource}`).join('\n')}`)}
         <p><code>resource</code>는 접근하려는 API 주소를 나타내는 표준 매개변수입니다. 이 데모는 호출할 주소마다 반복해서 인가 요청과 코드 교환에 동일하게 전달합니다. 미지는 <code>openid</code> 동의에 UserInfo 대상도 포함합니다.</p>
         <p>코드 교환에는 <code>grant_type=authorization_code</code>, 받은 <code>code</code>, 같은 <code>redirect_uri</code>, <code>client_id</code>, 저장한 <code>code_verifier</code>와 해당 <code>resource</code>를 보냅니다. 이 예제의 공개 클라이언트 인증 방식은 <code>none</code>입니다.</p>
         <p>state·nonce·PKCE verifier는 브라우저별 일회용 요청에 묶어 서버에 저장합니다. 콜백의 state·iss, ID 토큰의 RS256 서명·iss·aud·exp·nonce·at_hash, UserInfo의 sub를 확인한 뒤 자체 세션을 만듭니다. 전체 구현은 ${link(`${SOURCE}/blob/main/src/oidc.ts`, 'src/oidc.ts')}를 참고하세요.</p>
@@ -84,6 +84,25 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
           <tr><td>접근 토큰</td><td><code>dgt_…</code> 형태의 opaque 값</td><td>API의 Bearer 인증</td></tr>
         </tbody></table></div>
         <p>접근 토큰을 JWT처럼 해석하거나 자체적으로 회원 정보를 추출하지 마세요. API에는 ID 토큰 대신 <code>access_token</code>을 보냅니다. OAuth가 모든 접근 토큰의 JWT 형식을 요구하는 것은 아닙니다.</p>
+      </details>
+    </section>
+
+    <section class="dg-section" id="dg-session" aria-labelledby="dg-session-title">
+      <h2 id="dg-session-title">로그인은 얼마나 유지되나요?</h2>
+      <p>새 로그인부터 <strong>30일 미사용 시 만료, 실제 미지 인증 후 최대 90일</strong>을 적용합니다. 로그인한 홈·내 정보·내 스킬·프로젝트 방문과 해당 화면의 정상 POST는 미사용 기한을 갱신합니다. 더 보기·프로젝트 선택도 사용으로 보지만, 페이지를 열어 두기만 하는 백그라운드 ping은 없습니다. 계속 사용해도 90일 상한은 늘어나지 않습니다.</p>
+      <p>미지 로그인, 이 데모 로그인, Google 등의 로그인은 서로 다른 세션입니다. 미지와 데모는 각각 30일 미사용·90일 절대 한도를 적용합니다. 영속 쿠키가 유효하면 브라우저를 다시 열어도 로그인은 유지되지만, 쿠키 삭제·로그아웃·만료 시에는 다시 로그인합니다. 데모 로그아웃은 미지나 Google의 로그인까지 끝내지 않습니다.</p>
+      <p>기존 데모 세션은 종전 30분 만료를 유지하며 새 로그인부터 새 정책을 적용합니다. refresh token이 없는 예전 연결은 한 번 다시 연결해야 합니다. API 연결이 취소되어도 유효한 앱 로그인은 유지하고 이전 조회 결과를 구분해서 표시합니다.</p>
+      <details class="dg-detail"><summary>세션·토큰 수명과 내 서비스의 정책 변경</summary>
+        <div class="dg-table-wrap"><table class="dg-table"><thead><tr><th>대상</th><th>현재 기한</th><th>의미</th></tr></thead><tbody>
+          <tr><td>앱 로그인</td><td>30일 미사용 / 최대 90일</td><td>검증한 인증 시각과 세션 발급 시각에서 각각 90일 중 이른 상한</td></tr>
+          <tr><td>로그인 시도</td><td>10분</td><td>state·nonce·PKCE를 묶은 일회용 요청</td></tr>
+          <tr><td>인가 코드</td><td>60초</td><td>한 번 교환</td></tr>
+          <tr><td>ID 토큰</td><td>5분</td><td>로그인 결과 검증용</td></tr>
+          <tr><td>접근 토큰</td><td>현재 1시간</td><td>응답의 <code>expires_in</code>을 기준으로 계산</td></tr>
+          <tr><td>갱신 토큰</td><td>90일 미사용 / 발급 후 최대 365일</td><td>API 자격 갱신용이며 앱 로그인 한도를 늘리지 않음</td></tr>
+        </tbody></table></div>
+        <p>30일·90일은 이 서비스의 정책이며 OIDC 표준이 정한 수명이 아닙니다. 개발자는 ${link(`${SOURCE}/blob/main/src/session-policy.ts`, 'src/session-policy.ts')}의 <code>SESSION_IDLE_SECONDS</code>·<code>SESSION_ABSOLUTE_SECONDS</code>를 검토하세요. 서버 만료 검사·쿠키·DynamoDB TTL·OIDC <code>max_age</code>가 함께 적용되어야 합니다. 검증한 <code>auth_time</code>으로 절대 한도를 제한하므로 재동의나 토큰 갱신이 새 로그인 시각을 만들지 않습니다.</p>
+        <p>서버에서 만료를 검사하고 운영 쿠키에 Secure·HttpOnly·SameSite=Lax를 사용합니다. 이 구분의 배경은 ${link('https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html#automatic-session-expiration', 'OWASP 세션 만료 지침')}과 ${link('https://openid.net/specs/openid-connect-core-1_0.html#IDToken', 'OIDC auth_time 정의')}에서 확인할 수 있습니다.</p>
       </details>
     </section>
 
@@ -143,14 +162,14 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
       </tbody></table></div>
       <p>위 회원 API의 오류 응답은 <code>application/problem+json</code>이며 <code>type</code>, <code>title</code>, <code>status</code>, <code>code</code>, <code>trace_id</code> 등을 사용합니다. 예를 들어 <code>session_expired</code>는 만료·취소된 토큰, <code>consent_required</code>는 권한 부족 등에 사용됩니다. OIDC UserInfo의 <code>{ error, error_description }</code> 응답과 구분하세요.</p>
       <details class="dg-detail"><summary>이 데모에만 적용한 저장·조회 정책</summary>
-        <ul><li>추가 API 권한을 허용하면 접근 토큰만 서버 전용 DynamoDB 필드에 보관합니다. 저장 시 암호화(SSE)를 사용하며 일반 세션 조회·화면 모델·브라우저·로그에 토큰 원문을 전달하지 않습니다. ID 토큰과 갱신 토큰은 보관하지 않습니다.</li>
-          <li>데모 세션은 30분이며 조회 시점의 최소 요약을 저장합니다. 현재 미지 접근 토큰 응답의 <code>expires_in</code>은 3600초이지만, 데모는 실제 토큰 만료와 30분 세션 만료 중 이른 시각까지만 사용합니다. 이는 OIDC 표준이 정한 세션 수명이 아닙니다.</li>
-          <li><code>POST /refresh-profile</code>은 회원 기본 정보와 소개를, <code>POST /refresh-skills</code>는 스킬 목록만 갱신합니다. 다른 화면의 조회 결과와 프로젝트 선택, 세션 ID·만료 시각은 바꾸지 않습니다. 요청의 Origin과 세션, 저장된 권한·대상 API를 서버에서 확인합니다.</li>
-          <li>조회 실패 시 이전 결과와 조회 시각을 유지합니다. 프로필의 일부 API만 성공하면 해당 결과만 갱신하므로 각 시각을 확인하세요. 만료·권한 해제·401/403 등으로 연결을 사용할 수 없으면 접근 토큰을 제거하고 재연결을 안내합니다. 스킬의 후속 페이지에서 401/403이 발생한 경우에도 이번 목록 대신 이전 목록과 조회 시각을 유지합니다. 자동 OAuth 이동이나 갱신 토큰을 통한 자동 갱신은 구현하지 않습니다.</li>
+        <ul><li>추가 API 권한을 허용하면 접근·갱신 토큰을 서버 전용 DynamoDB 필드에 보관합니다. 저장 시 암호화(SSE)를 사용하며 일반 세션 조회·화면 모델·브라우저·로그에 토큰 원문을 전달하지 않습니다. ID 토큰은 보관하지 않습니다.</li>
+          <li>접근 토큰은 실제 응답의 <code>expires_in</code>(현재 3600초)을 따릅니다. 사용자가 다시 가져오기를 요청할 때 만료가 가까우면 서버가 갱신합니다. 분산 잠금과 조건부 저장으로 갱신을 직렬화하고 회전된 최신 토큰을 보관합니다. 토큰 갱신으로 로그인 절대 한도를 연장하지 않습니다.</li>
+          <li><code>POST /refresh-profile</code>은 회원 기본 정보와 소개를, <code>POST /refresh-skills</code>는 스킬 목록만 갱신합니다. 다른 화면의 조회 결과와 프로젝트 선택, 세션 ID·로그인 절대 한도는 유지합니다. 정상 사용으로 미사용 기한만 갱신하며 요청의 Origin과 세션, 저장된 권한·대상 API를 서버에서 확인합니다.</li>
+          <li>조회 실패 시 이전 결과와 조회 시각을 유지합니다. 프로필의 일부 API만 성공하면 해당 결과만 갱신하므로 각 시각을 확인하세요. 권한 취소·갱신의 <code>invalid_grant</code>·API의 401/403에는 자격을 제거하고 재연결을 안내하며 앱 로그인은 별도로 유지합니다. 스킬 후속 페이지의 401/403도 이번 목록 대신 이전 목록과 조회 시각을 유지합니다. 일시적인 통신 실패를 새 조회 성공으로 표시하거나 자동으로 OAuth 화면을 열지 않습니다.</li>
           <li>스킬은 최대 200개 고유 ID, 저장 요약 192 KiB, 10페이지, 5초 중 먼저 도달한 한도까지 모읍니다. 원본 응답은 페이지당 256 KiB·누적 1 MiB이며 공통 API 시간 예산도 적용합니다.</li>
           <li>후속 페이지에서 실패하면 앞서 확인한 목록과 중단 사유를 남깁니다. 같은 ID는 첫 정보를 유지합니다. 저장된 목록을 모두 펼쳤다는 것과 모든 원천 스킬을 수집했다는 것은 별개입니다.</li>
           <li>더 보기는 저장된 목록만 펼칩니다. 예전 세션처럼 재조회 연결이 없으면 한 번 명시적으로 다시 연결해야 합니다. 재연결은 새 인증·동의 흐름이며, 같은 회원으로 기본 회원 조회까지 성공하면 유효한 기존 세션의 프로젝트 선택을 이어갑니다. 다른 계정에는 이전 정보나 목표를 넘기지 않습니다. 거절·로그인 검증 실패 시 기존 세션은 유지됩니다.</li>
-          <li>로그아웃이나 계정 교체 시 이전 서버 세션과 접근 토큰을 삭제합니다. DynamoDB의 TTL 삭제는 지연될 수 있지만, 앱은 세션·토큰의 만료를 매 요청에서 검사해 만료된 연결을 즉시 사용할 수 없게 합니다.</li>
+          <li>로그아웃이나 계정 교체 시 이전 서버 세션과 접근·갱신 토큰을 삭제합니다. DynamoDB의 TTL 삭제는 지연될 수 있지만, 앱은 세션·토큰의 만료를 검사해 만료된 연결을 사용할 수 없게 합니다.</li>
           <li>미지에서 연결을 해제해도 이미 저장된 요약은 데모 세션에 남을 수 있습니다. 즉시 지우려면 데모에서도 로그아웃하세요. 데모 로그아웃은 미지의 로그인 상태까지 종료하지 않습니다.</li></ul>
       </details>
     </section>

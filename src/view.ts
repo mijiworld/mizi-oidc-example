@@ -181,7 +181,7 @@ function memberPanel(
     }
     ${apiAction(model, "profile", Boolean(member))}
     ${profileDetails(model)}
-    <details class="developer-note"><summary>어떤 API와 권한을 쓰나요?</summary><p><code>user:profile</code> 권한으로 서버가 <code>GET /v1/me</code>와 <code>GET /v1/me/profile</code>을 호출합니다. 응답의 회원 ID를 로그인한 회원과 대조한 뒤 필요한 항목만 보관합니다. 다시 가져오기는 이 두 API만 갱신하고 스킬 목록은 유지합니다.</p><p>API 접근 토큰은 서버 전용 저장소에서만 사용합니다. 유효한 연결로 조회하면 로그인 세션과 만료 시각, 프로젝트 선택이 유지됩니다. 연결이 없거나 만료되면 버튼을 눌러 다시 동의해야 하며 자동으로 미지에 이동하지 않습니다.</p><p>GitHub 연결 여부나 소개 내용은 스킬·개발 역량의 검증 결과가 아닙니다. 다시 연결할 때 스킬 조회 기록이 있다면 <code>user:skills</code>도 요청합니다. 같은 회원으로 재연결하고 기본 회원 조회가 성공하면 프로젝트 선택을 이어갑니다.</p></details>
+    <details class="developer-note"><summary>어떤 API와 권한을 쓰나요?</summary><p><code>user:profile</code> 권한으로 서버가 <code>GET /v1/me</code>와 <code>GET /v1/me/profile</code>을 호출합니다. 응답의 회원 ID를 로그인한 회원과 대조한 뒤 필요한 항목만 보관합니다. 다시 가져오기는 이 두 API만 갱신하고 스킬 목록은 유지합니다.</p><p>접근·갱신 토큰은 서버 전용 저장소에서만 사용합니다. 다시 가져올 때 필요한 토큰 갱신은 서버에서 처리하며 로그인과 프로젝트 선택을 유지합니다. 권한이 취소되거나 갱신할 수 없으면 다시 연결하기를 안내하고, 자동으로 미지에 이동하지 않습니다.</p><p>GitHub 연결 여부나 소개 내용은 스킬·개발 역량의 검증 결과가 아닙니다. 다시 연결할 때 스킬 조회 기록이 있다면 <code>user:skills</code>도 요청합니다. 같은 회원으로 재연결하고 기본 회원 조회가 성공하면 프로젝트 선택을 이어갑니다.</p></details>
   </section>`;
 }
 
@@ -327,7 +327,7 @@ function skillsPanel(model: HomeViewModel): string {
         : `<p class="subtle">${model.apiConnection?.skills === "ready" ? "허용한 스킬 정보를 다시 가져올 수 있어요. 내 정보 화면의 조회 결과는 그대로 유지됩니다." : "프로필·스킬 읽기에 동의하면 내 정보와 스킬 목록을 함께 가져옵니다. 이 단계를 건너뛰어도 로그인은 완료된 상태예요."}</p>${reason ? `<p class="inline-error" role="alert">${escape(SKILL_ERROR_MESSAGES[reason])}</p>` : ""}`
     }
     ${apiAction(model, "skills", Boolean(skills))}
-    <details class="developer-note"><summary>조회 범위와 검증 정보 읽는 법</summary><p>처음 연결할 때는 <code>user:profile</code>과 <code>user:skills</code>에 동의해 내 정보도 함께 가져옵니다. 연결 후 다시 가져오기는 <code>GET /v1/me/skills?limit=20</code>만 호출하고 프로필 결과는 유지합니다. 다음 커서가 있으면 이어서 읽되 최대 200개·10페이지·5초, 보관할 스킬 정보 192KiB 한도에서 멈춥니다.</p><p>재조회용 접근 토큰은 서버 전용 저장소에서만 사용하며, ID 토큰과 갱신 토큰은 보관하지 않습니다. 연결이 만료되면 명시적으로 다시 연결해야 합니다. ‘더 보기’는 저장된 목록을 20개씩 펼치며 API를 다시 호출하거나 세션 만료 시각을 연장하지 않습니다. 재조회도 프로젝트 선택과 세션 만료 시각을 유지합니다.</p><p>검증 방법·주체·시각은 API가 제공한 정보이며, 이 데모의 별도 검증이나 추천을 뜻하지 않습니다. 검증 시각이 없으면 조회 시각으로 대신하지 않습니다. 마지막 API 응답의 페이지 안내만으로 전체 스킬을 모두 가져왔다고 판단하지 않습니다.</p>${skills ? `<dl class="data">${row("조회 대상 · 로그인 회원", skills.subject)}${row("API", skills.endpoint)}${row("읽은 API 응답 항목 수 · 중복 포함", String(skills.returnedCount))}${row("마지막 응답의 후속 페이지 안내", skills.hasMore === null ? "정보 없음" : skills.hasMore ? "있음" : "없음")}${skills.collection ? `${row("수집 시작 시각 · UTC", skills.collection.startedAt)}${row("읽은 API 페이지 수", String(skills.collection.pages))}${row("중복으로 제외한 항목 수", String(skills.collection.duplicateCount))}${row("수집 종료 이유", skills.collection.stoppedReason)}` : ""}</dl><p>조회 대상은 검증된 로그인 계정입니다. 개별 스킬의 소유자 정보는 이 API 응답에 포함되지 않습니다.</p>` : ""}</details>
+    <details class="developer-note"><summary>조회 범위와 검증 정보 읽는 법</summary><p>처음 연결할 때는 <code>user:profile</code>과 <code>user:skills</code>에 동의해 내 정보도 함께 가져옵니다. 연결 후 다시 가져오기는 <code>GET /v1/me/skills?limit=20</code>만 호출하고 프로필 결과는 유지합니다. 다음 커서가 있으면 이어서 읽되 최대 200개·10페이지·5초, 보관할 스킬 정보 192KiB 한도에서 멈춥니다.</p><p>접근·갱신 토큰은 서버 전용 저장소에서만 사용하며 ID 토큰은 보관하지 않습니다. 다시 가져오기 때 필요한 토큰 갱신은 서버가 처리합니다. ‘더 보기’는 저장된 목록을 20개씩 펼치며 API를 다시 호출하지 않습니다. 정상 방문은 로그인 미사용 기한을 갱신하지만 90일 절대 한도와 프로젝트 선택은 유지합니다.</p><p>검증 방법·주체·시각은 API가 제공한 정보이며, 이 데모의 별도 검증이나 추천을 뜻하지 않습니다. 검증 시각이 없으면 조회 시각으로 대신하지 않습니다. 마지막 API 응답의 페이지 안내만으로 전체 스킬을 모두 가져왔다고 판단하지 않습니다.</p>${skills ? `<dl class="data">${row("조회 대상 · 로그인 회원", skills.subject)}${row("API", skills.endpoint)}${row("읽은 API 응답 항목 수 · 중복 포함", String(skills.returnedCount))}${row("마지막 응답의 후속 페이지 안내", skills.hasMore === null ? "정보 없음" : skills.hasMore ? "있음" : "없음")}${skills.collection ? `${row("수집 시작 시각 · UTC", skills.collection.startedAt)}${row("읽은 API 페이지 수", String(skills.collection.pages))}${row("중복으로 제외한 항목 수", String(skills.collection.duplicateCount))}${row("수집 종료 이유", skills.collection.stoppedReason)}` : ""}</dl><p>조회 대상은 검증된 로그인 계정입니다. 개별 스킬의 소유자 정보는 이 API 응답에 포함되지 않습니다.</p>` : ""}</details>
   </section>`;
 }
 
@@ -346,7 +346,7 @@ function projectPanel(model: HomeViewModel, ready: boolean): string {
         ${PROJECT_PLANS.map((plan) => `<button class="plan-option${selected?.id === plan.id ? " selected" : ""}" type="submit" name="goal" value="${escape(plan.id)}" aria-pressed="${selected?.id === plan.id}"><strong>${escape(plan.title)}</strong><span>${escape(plan.description)}</span><span class="plan-action">${selected?.id === plan.id ? "선택됨 ✓" : "이걸로 시작 →"}</span></button>`).join("")}
       </form>
       ${selected ? `<div class="project-board"><div class="board-heading"><h3>${escape(selected.title)} 시작 목록</h3><span class="status">이 데모에 저장됨</span></div><ol class="flow">${selected.steps.map((step) => `<li><strong>${escape(step)}</strong></li>`).join("")}</ol></div>` : ""}
-      <p class="fine">선택은 이 데모의 30분 세션에만 보관되며, 세션 만료나 로그아웃 시 사라집니다.</p>`
+      <p class="fine">선택은 이 데모의 유효한 로그인 세션에 보관되며, 세션 만료나 로그아웃 시 사라집니다.</p>`
         : ""
     }
     <p class="fine">이 보드는 시작 목록을 고르는 체험입니다. 실제 프로젝트나 코드를 생성하지 않습니다. 미지의 추천이나 검증된 스킬을 뜻하지 않으며, 선택을 미지에 저장하지 않습니다.</p>
@@ -416,7 +416,7 @@ function success(
       ? "허용한 내 정보를 한곳에서 확인하세요. 로그인은 이미 완료된 상태예요."
       : page === "skills"
         ? "미지에서 제공하는 내 스킬 기록을 확인하는 공간이에요."
-        : "서비스 종류를 고르고 시작 목록을 체험해 보세요. 선택은 이 데모의 30분 세션에만 보관돼요.";
+        : "서비스 종류를 고르고 시작 목록을 체험해 보세요. 선택은 이 데모의 로그인 기간 동안 보관돼요.";
   const body =
     page === "home"
       ? dashboard(model, profile, member)
@@ -426,7 +426,7 @@ function success(
     ${refreshFeedback(model)}
     ${body}
     ${page === "home" ? loginProof(profile, verified) : ""}
-    <div class="session-actions"><form action="${escape(model.logoutAction)}" method="post"><button class="button secondary" type="submit">이 데모에서 로그아웃</button></form><p class="fine">이 데모의 세션만 종료합니다. 미지 계정은 로그아웃되지 않습니다.</p></div>
+    <div class="session-actions"><form action="${escape(model.logoutAction)}" method="post"><button class="button secondary" type="submit">이 데모에서 로그아웃</button></form><p class="fine">새 로그인부터 30일 미사용 또는 실제 미지 인증 후 최대 90일에 다시 로그인합니다. 이 데모의 로그아웃은 미지·Google의 로그인까지 종료하지 않습니다.</p></div>
     ${resources()}`;
 }
 

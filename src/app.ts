@@ -4,13 +4,15 @@ import { bodyLimit } from 'hono/body-limit';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import type { Config } from './config.js';
 import type { OidcProvider } from './oidc.js';
-import { ATTEMPT_TTL_SECONDS, SESSION_TTL_SECONDS, digest, opaqueSchema, type Store, type Session } from './store.js';
+import { ATTEMPT_TTL_SECONDS, digest, opaqueSchema, type Store, type Session } from './store.js';
 import { renderHome } from './view.js';
 import { LoginFailure, type LoginStage } from './login-error.js';
 import { projectGoalSchema } from './service.js';
 import type { HomeViewModel } from './view-model.js';
-import { ApiGrantUnavailable, type ApiRefreshPage } from './api-grant.js';
+import { ApiGrantUnavailable, type ApiGrant, type ApiRefreshPage } from './api-grant.js';
 import { ApiSnapshotInvalid, checkedApiPatch, type ApiSnapshotPatch } from './session-api.js';
+import { newSessionLifetime } from './session-policy.js';
+import { usableApiGrant } from './renew-api-grant.js';
 
 const random = (): string => randomBytes(32).toString('base64url');
 const seconds = (): number => Math.floor(Date.now() / 1000);
@@ -28,7 +30,7 @@ const refreshFeedback = ['updated', 'partial', 'unavailable', 'reconnect_require
 
 function apiConnection(session: Session, config: Config): NonNullable<HomeViewModel['apiConnection']> {
   const access = session.apiAccess;
-  const ready = (scope: string, paths: string[]) => access && access.expiresAt > seconds() &&
+  const ready = (scope: string, paths: string[]) => access && (access.expiresAt > seconds() || access.renewable) &&
     access.scope.split(' ').includes(scope) && paths.every((path) => access.resources.includes(new URL(path, config.issuer).href));
   return {
     profile: ready('user:profile', ['/v1/me', '/v1/me/profile']) ? 'ready'
@@ -42,6 +44,18 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
   const sessionCookie = config.secureCookies ? '__Host-mizi_demo_session' : 'mizi_demo_session';
   const attemptCookie = config.secureCookies ? '__Host-mizi_demo_attempt' : 'mizi_demo_attempt';
   const cookieOptions = { httpOnly: true, secure: config.secureCookies, sameSite: 'Lax' as const, path: '/' };
+
+  async function currentSession(c: Context, id: string | undefined): Promise<Session | null> {
+    if (!id || !opaqueSchema.safeParse(id).success) return null;
+    const now = seconds();
+    const session = await store.renewSession(id, now);
+    if (!session) { deleteCookie(c, sessionCookie, cookieOptions); return null; }
+    // Legacy sessions keep their original server and browser expiration.
+    if (session.absoluteExpiresAt !== undefined) {
+      setCookie(c, sessionCookie, id, { ...cookieOptions, maxAge: Math.max(0, session.expiresAt - now) });
+    }
+    return session;
+  }
 
   app.use('*', async (c, next) => {
     c.header('Cache-Control', 'no-store');
@@ -66,7 +80,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
   app.get('/client.json', (c) => c.json({
     client_id: `${config.baseUrl}/client.json`, client_name: 'MiZi OIDC 로그인 예제',
     client_uri: config.baseUrl, redirect_uris: [config.callbackUrl],
-    token_endpoint_auth_method: 'none', grant_types: ['authorization_code'], response_types: ['code'],
+    token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'],
     scope: 'openid profile user:profile user:skills',
   }));
   // Public documentation never reads a member session or calls the provider.
@@ -79,10 +93,6 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
   });
   const pages = { '/': 'home', '/profile': 'profile', '/skills': 'skills', '/projects': 'projects' } as const;
   async function page(c: Context, name: NonNullable<HomeViewModel['page']>) {
-    const cookie = getCookie(c, sessionCookie);
-    const session = cookie && opaqueSchema.safeParse(cookie).success ? await store.getSession(cookie, seconds()) : null;
-    if (cookie && !session) deleteCookie(c, sessionCookie, cookieOptions);
-    if (name !== 'home' && !session) return c.redirect(`${config.baseUrl}/?service_error=login_required`, 303);
     let skillsVisibleCount = 20;
     if (name === 'skills') {
       const values = c.req.queries('shown') ?? [];
@@ -93,6 +103,10 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
       }
       if (values.length) skillsVisibleCount = Number(values[0]);
     }
+    const cookie = getCookie(c, sessionCookie);
+    const session = await currentSession(c, cookie);
+    if (cookie && !session) deleteCookie(c, sessionCookie, cookieOptions);
+    if (name !== 'home' && !session) return c.redirect(`${config.baseUrl}/?service_error=login_required`, 303);
     // no-referrer can make browser form POSTs send Origin: null. Every form document
     // must retain its origin; redirects and callback/error responses keep no-referrer.
     c.header('Referrer-Policy', 'strict-origin');
@@ -117,7 +131,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     let readSkillsApi = returnPage === 'skills';
     if (returnPage) {
       const cookie = getCookie(c, sessionCookie);
-      const session = cookie && opaqueSchema.safeParse(cookie).success ? await store.getSession(cookie, seconds()) : null;
+      const session = await currentSession(c, cookie);
       if (!session) return c.redirect(`${config.baseUrl}/?service_error=login_required`, 303);
       // Refresh previously requested skills alongside profile data rather than carrying
       // an old snapshot into a new session or silently losing the skills page.
@@ -148,22 +162,20 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
   async function refresh(c: Context, page: ApiRefreshPage) {
     if (c.req.header('Origin') !== config.baseUrl) return c.text('허용되지 않은 요청입니다.', 403);
     const id = getCookie(c, sessionCookie);
-    const session = id && opaqueSchema.safeParse(id).success ? await store.getSession(id, seconds()) : null;
+    const session = await currentSession(c, id);
     if (!id || !session) return c.redirect(`${config.baseUrl}/?service_error=session_expired`, 303);
     const finish = (status: typeof refreshFeedback[number]) => c.redirect(`${config.baseUrl}/${page}?api_status=${status}`, 303);
+    let currentGrant: ApiGrant | undefined;
     try {
-      const grant = await store.getApiGrant(id, session.profile.sub, seconds());
-      if (!grant) {
-        await store.clearApiGrant(id, session.profile.sub, seconds());
-        return finish('reconnect_required');
-      }
+      const grant = await usableApiGrant(store, oidc, id, session, seconds);
+      currentGrant = grant;
       if (!oidc.readApis) return finish('unavailable');
       const result = await oidc.readApis(grant, page);
       const requested = page === 'profile' ? [result.memberApi, result.profileDetails] : [result.skillsApi];
       if (requested.some((value) => value?.status === 'error' &&
           ['unauthorized', 'forbidden', 'scope_missing'].includes(value.reason)) ||
           (page === 'skills' && result.skillsApi?.status === 'success' && result.skillsApi.collection?.authorizationFailure)) {
-        await store.clearApiGrant(id, session.profile.sub, seconds());
+        await store.clearApiGrant(id, session.profile.sub, seconds(), grant.accessToken);
         return finish('reconnect_required');
       }
       // Update only the requested successful fields. Failures keep their old snapshots.
@@ -184,7 +196,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
       return finish(partial ? 'partial' : 'updated');
     } catch (error) {
       if (error instanceof ApiGrantUnavailable || error instanceof LoginFailure || error instanceof ApiSnapshotInvalid) {
-        await store.clearApiGrant(id, session.profile.sub, seconds());
+        if (currentGrant) await store.clearApiGrant(id, session.profile.sub, seconds(), currentGrant.accessToken);
         return finish(error instanceof ApiGrantUnavailable ? 'reconnect_required' : 'invalid_response');
       }
       // Never expose API bodies, tokens, SDK errors or validation input in logs/UI.
@@ -198,7 +210,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     onError: (c) => c.text('요청 내용이 너무 큽니다.', 413) }), async (c) => {
     if (c.req.header('Origin') !== config.baseUrl) return c.text('허용되지 않은 요청입니다.', 403);
     const id = getCookie(c, sessionCookie);
-    const session = id && opaqueSchema.safeParse(id).success ? await store.getSession(id, seconds()) : null;
+    const session = await currentSession(c, id);
     if (!session) return c.redirect(`${config.baseUrl}/?service_error=session_expired`, 303);
     if (session.memberApi?.status !== 'success' || session.memberApi.profile.id !== session.profile.sub) {
       return c.redirect(`${config.baseUrl}/projects?service_error=profile_required`, 303);
@@ -245,10 +257,11 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
         ? previous.projectGoal : undefined;
       const id = random();
       stage = 'session_write';
-      await store.putSession(id, { ...identity, expiresAt: seconds() + SESSION_TTL_SECONDS,
+      const lifetime = newSessionLifetime(seconds(), identity.verification.authenticatedAt);
+      await store.putSession(id, { ...identity, ...lifetime,
         ...(preserveGoal ? { projectGoal: preserveGoal } : {}) }, apiGrant);
       if (previousId && opaqueSchema.safeParse(previousId).success) await store.deleteSession(previousId);
-      setCookie(c, sessionCookie, id, { ...cookieOptions, maxAge: SESSION_TTL_SECONDS });
+      setCookie(c, sessionCookie, id, { ...cookieOptions, maxAge: lifetime.expiresAt - seconds() });
       return c.redirect(`${config.baseUrl}/${attempt.returnPage ?? ''}`, 303);
     } catch (error) {
       console.warn('login_failed', { stage: error instanceof LoginFailure ? error.stage : stage });
