@@ -6,6 +6,8 @@ export const developerGuideStyles = `
 .dev-guide p + p { margin-top: 12px; }
 .dg-hero { max-width: 760px; }
 .dg-links { display: flex; flex-wrap: wrap; gap: 12px 22px; margin-top: 24px; font-size: 14px; font-weight: 600; }
+.dg-discovery-link { min-width: 0; max-width: 100%; }
+.dg-discovery-link p { margin-top: 4px; color: var(--muted); font-size: 13px; font-weight: 400; }
 .dg-toc { margin: 32px 0; padding: 18px 22px; border: 1px solid var(--line); border-radius: 12px; }
 .dg-toc strong { display: block; color: var(--muted); font-size: 12px; }
 .dg-toc ol { display: flex; flex-wrap: wrap; gap: 8px 24px; list-style: none; margin: 10px 0 0; padding: 0; font-size: 14px; }
