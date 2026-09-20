@@ -38,7 +38,7 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
       <p class="eyebrow">Developer guide · MiZi API</p>
       <h1 id="developer-title">미지 로그인에서<br>내 서비스까지.</h1>
       <p class="lead">사용자가 허용한 정보만 읽어 여러분의 서비스에 연결하세요. 이 페이지는 데모가 사용하는 인증 흐름과 세 가지 읽기 API를 설명합니다. 로그인 없이 볼 수 있습니다.</p>
-      <div class="dg-links"><a href="/">데모 홈으로 돌아가기</a>${link(`${SOURCE}#quickstart`, 'GitHub에서 시작하기')}${link(GUIDE, '미지 OIDC 가이드')}${link(discovery, '현재 Discovery 보기')}</div>
+      <div class="dg-links"><a href="/">데모 홈으로 돌아가기</a>${link(`${SOURCE}#quickstart`, 'GitHub에서 시작하기')}${link(GUIDE, '미지 OIDC 가이드')}<div class="dg-discovery-link">${link(discovery, '로그인 연동 설정(JSON) 보기')}<p>로그인 라이브러리가 자동으로 읽는 서버 설정입니다.</p></div></div>
     </div>
     <nav class="dg-toc" aria-label="API 가이드 목차"><strong>필요한 부분부터 읽기</strong><ol>
       <li><a href="#dg-start">시작하기</a></li><li><a href="#dg-auth">로그인과 권한</a></li><li><a href="#dg-session">로그인 유지 정책</a></li><li><a href="#dg-api">API 규격</a></li>
