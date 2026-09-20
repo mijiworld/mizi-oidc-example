@@ -17,10 +17,15 @@ export const apiGrantSchema = z.object({
   subject: z.string().min(1).max(255),
   issuer: httpsUrl,
   clientId: z.string().min(1).max(2048),
-  resources: z.array(httpsUrl).min(1).max(3).refine((items) => new Set(items).size === items.length),
+  resources: z.array(httpsUrl).min(1).max(4).refine((items) => new Set(items).size === items.length),
   expiresAt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 });
 export type ApiGrant = z.infer<typeof apiGrantSchema>;
+export function profileBioResource(issuer: string): string {
+  const url = new URL('/v1/me/profile/bio', issuer);
+  if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Untrusted API endpoint.');
+  return url.href;
+}
 export type ApiRefreshPage = 'profile' | 'skills';
 export interface ApiRefreshResult {
   memberApi?: MemberApiResult;

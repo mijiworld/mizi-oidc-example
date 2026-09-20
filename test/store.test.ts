@@ -5,6 +5,8 @@ import { loadConfig } from '../src/config.js';
 import { digest, MemoryStore, type Attempt, type Session } from '../src/store.js';
 import type { ApiGrant } from '../src/api-grant.js';
 import type { ApiSnapshotPatch } from '../src/session-api.js';
+import type { ProfileWriteNotice } from '../src/profile-write-notice.js';
+import type { ProfileDetailsResult } from '../src/extra-api-model.js';
 
 const now = Math.floor(Date.now() / 1000);
 const attempt: Attempt = { state: 's'.repeat(43), nonce: 'n'.repeat(43), codeVerifier: 'v'.repeat(43),
@@ -383,6 +385,151 @@ describe('conditional API snapshot updates', () => {
     await expect(f.store.clearApiGrant('raw-session', session.profile.sub, now)).resolves.toBeUndefined();
     f.send.mockRejectedValueOnce(new Error('storage unavailable'));
     await expect(f.store.clearApiGrant('raw-session', session.profile.sub, now)).rejects.toThrow('storage unavailable');
+  });
+});
+
+describe('profile writes cannot be overwritten by stale reads or late write receipts', () => {
+  const firstRevision = 'a'.repeat(43);
+  const nextRevision = 'b'.repeat(43);
+  const attemptedAt = '2026-09-20T03:00:00.000Z';
+  const details = (bio: string): Extract<ProfileDetailsResult, { status: 'success' }> => ({
+    status: 'success', subject: session.profile.sub, endpoint: 'https://issuer.example/v1/me/profile',
+    fetchedAt: attemptedAt, partial: false, profile: { bio, role: null, interests: ['웹'] },
+  });
+  const receipt = (id: string, draft: string): ProfileWriteNotice => ({
+    id, status: 'saved_verified', draft, attemptedAt,
+  });
+
+  it.each([null, firstRevision])('rejects an in-flight read after a write changes starting revision %s', async (initial) => {
+    const store = new MemoryStore();
+    await store.putSession('write-race', {
+      ...apiSession, ...(initial === null ? {} : { profileWriteRevision: initial }),
+    }, apiGrant);
+    const readStarted = await store.getSession('write-race', now);
+    const write = receipt(nextRevision, '저장된 새 소개');
+    expect(await store.saveProfileWrite('write-race', session.profile.sub, apiGrant.accessToken,
+      write, details(write.draft), now, initial)).toBe(true);
+    const afterWrite = await store.getSession('write-race', now);
+    expect(await store.saveApiResults('write-race', session.profile.sub, apiGrant.expiresAt,
+      { ...memberUpdate, profileDetails: details('이전 조회 결과') }, now,
+      readStarted!.profileWriteRevision ?? null)).toBe(false);
+    expect(await store.getSession('write-race', now)).toEqual(afterWrite);
+    expect(afterWrite).toMatchObject({ profileWrite: write, profileWriteRevision: nextRevision,
+      profileDetails: details(write.draft), projectGoal: apiSession.projectGoal, expiresAt: apiSession.expiresAt });
+    expect(await store.getApiGrant('write-race', session.profile.sub, now)).toEqual(apiGrant);
+  });
+
+  it('retains the revision after a fresh read clears the receipt, preventing an absent-receipt ABA race', async () => {
+    const store = new MemoryStore();
+    await store.putSession('aba', apiSession, apiGrant);
+    const oldRead = await store.getSession('aba', now);
+    const write = receipt(firstRevision, '새 소개');
+    await store.saveProfileWrite('aba', session.profile.sub, apiGrant.accessToken, write, details(write.draft), now, null);
+    expect(await store.saveApiResults('aba', session.profile.sub, apiGrant.expiresAt,
+      { profileDetails: details('다시 확인한 소개') }, now, firstRevision)).toBe(true);
+    const refreshed = await store.getSession('aba', now);
+    expect(refreshed).not.toHaveProperty('profileWrite');
+    expect(refreshed!.profileWriteRevision).toBe(firstRevision);
+    expect(await store.saveApiResults('aba', session.profile.sub, apiGrant.expiresAt,
+      { profileDetails: details('가장 오래된 소개') }, now, oldRead!.profileWriteRevision ?? null)).toBe(false);
+    expect(await store.getSession('aba', now)).toEqual(refreshed);
+  });
+
+  it('allows only one concurrent write receipt from the same revision even when timestamps match', async () => {
+    const store = new MemoryStore();
+    await store.putSession('two-writes', apiSession, apiGrant);
+    const writes = [receipt(firstRevision, '첫 번째 소개'), receipt(nextRevision, '두 번째 소개')];
+    const results = await Promise.all(writes.map((write) => store.saveProfileWrite('two-writes',
+      session.profile.sub, apiGrant.accessToken, write, details(write.draft), now, null)));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const saved = writes[results.indexOf(true)]!;
+    const value = await store.getSession('two-writes', now);
+    expect(value).toMatchObject({ profileWrite: saved, profileWriteRevision: saved.id, profileDetails: details(saved.draft) });
+    const following = receipt('c'.repeat(43), '그다음 소개');
+    expect(await store.saveProfileWrite('two-writes', session.profile.sub, apiGrant.accessToken,
+      following, details(following.draft), now, saved.id)).toBe(true);
+    expect(await store.saveProfileWrite('two-writes', session.profile.sub, apiGrant.accessToken,
+      saved, details(saved.draft), now, saved.id)).toBe(false);
+  });
+
+  it('advances the revision for uncertain writes without replacing the last verified snapshot', async () => {
+    const store = new MemoryStore();
+    await store.putSession('uncertain', apiSession, apiGrant);
+    const write: ProfileWriteNotice = { ...receipt(firstRevision, '확인되지 않은 초안'), status: 'unknown' };
+    expect(await store.saveProfileWrite('uncertain', session.profile.sub, apiGrant.accessToken,
+      write, undefined, now, null)).toBe(true);
+    expect(await store.saveApiResults('uncertain', session.profile.sub, apiGrant.expiresAt,
+      { profileDetails: details('쓰기 전 조회') }, now, null)).toBe(false);
+    expect(await store.getSession('uncertain', now)).toMatchObject({ profileDetails: apiSession.profileDetails,
+      profileWrite: write, profileWriteRevision: firstRevision });
+  });
+
+  it('does not block independent member/skills refreshes or change the project, expiry or private grant', async () => {
+    const store = new MemoryStore();
+    await store.putSession('independent', apiSession, apiGrant);
+    const write = receipt(firstRevision, '새 소개');
+    await store.saveProfileWrite('independent', session.profile.sub, apiGrant.accessToken, write, details(write.draft), now, null);
+    const before = await store.getSession('independent', now);
+    const patch = { ...memberUpdate, skillsApi: apiSession.skillsApi! };
+    expect(await store.saveApiResults('independent', session.profile.sub, apiGrant.expiresAt, patch, now, null)).toBe(true);
+    expect(await store.getSession('independent', now)).toEqual({ ...before, ...patch });
+    expect(await store.getApiGrant('independent', session.profile.sub, now)).toEqual(apiGrant);
+  });
+
+  it('keeps optional-argument compatibility while allowing a guarded first read in an old session', async () => {
+    const store = new MemoryStore();
+    await store.putSession('legacy', apiSession, apiGrant);
+    expect(await store.saveApiResults('legacy', session.profile.sub, apiGrant.expiresAt,
+      { profileDetails: details('읽기 결과') }, now, null)).toBe(true);
+    const write = receipt(firstRevision, '저장 결과');
+    expect(await store.saveProfileWrite('legacy', session.profile.sub, apiGrant.accessToken,
+      write, details(write.draft), now)).toBe(true);
+    expect(await store.saveApiResults('legacy', session.profile.sub, apiGrant.expiresAt,
+      { profileDetails: details('이전 호출 계약') }, now)).toBe(true);
+    expect((await store.getSession('legacy', now))!.profileWriteRevision).toBe(firstRevision);
+  });
+
+  it.each([null, firstRevision])('enforces the Dynamo revision condition atomically for both operations (%s)', async (expected) => {
+    const f = dynamoFixture();
+    const write = receipt(nextRevision, '저장할 소개');
+    await f.store.saveProfileWrite('conditional', session.profile.sub, apiGrant.accessToken,
+      write, details(write.draft), now, expected);
+    await f.store.saveApiResults('conditional', session.profile.sub, apiGrant.expiresAt,
+      { profileDetails: details('조회 결과') }, now, expected);
+    for (const [command] of f.send.mock.calls) {
+      const { input } = command as UpdateCommand;
+      expect(input.ConditionExpression).toContain(expected === null
+        ? 'AND attribute_not_exists(#writeRevision)' : 'AND #writeRevision = :expectedProfileWrite');
+      expect(input.ExpressionAttributeNames!['#writeRevision']).toBe('profileWriteRevision');
+      if (expected === null) expect(input.ExpressionAttributeValues).not.toHaveProperty(':expectedProfileWrite');
+      else expect(input.ExpressionAttributeValues![':expectedProfileWrite']).toBe(expected);
+    }
+    const writeCommand = f.send.mock.calls[0]![0] as UpdateCommand;
+    expect(writeCommand.input.UpdateExpression).toContain('#writeRevision = :writeRevision');
+    expect(writeCommand.input.ExpressionAttributeValues![':writeRevision']).toBe(nextRevision);
+    const readCommand = f.send.mock.calls[1]![0] as UpdateCommand;
+    expect(readCommand.input.UpdateExpression).toContain('REMOVE #write');
+    expect(readCommand.input.UpdateExpression).not.toContain('#writeRevision');
+    f.send.mockRejectedValueOnce(conditionalFailure());
+    expect(await f.store.saveProfileWrite('conditional', session.profile.sub, apiGrant.accessToken,
+      write, details(write.draft), now, expected)).toBe(false);
+    f.send.mockRejectedValueOnce(conditionalFailure());
+    expect(await f.store.saveApiResults('conditional', session.profile.sub, apiGrant.expiresAt,
+      { profileDetails: details('조회 결과') }, now, expected)).toBe(false);
+    expect(f.send).toHaveBeenCalledTimes(4);
+  });
+
+  it('projects the persistent revision in Dynamo session reads and leaves unrelated update expressions unchanged', async () => {
+    const f = dynamoFixture({ Item: { ...apiSession, profileWriteRevision: firstRevision } });
+    expect((await f.store.getSession('projected', now))!.profileWriteRevision).toBe(firstRevision);
+    const read = f.send.mock.calls[0]![0] as GetCommand;
+    expect(read.input.ProjectionExpression).toContain('#writeRevision');
+    expect(read.input.ExpressionAttributeNames!['#writeRevision']).toBe('profileWriteRevision');
+    await f.store.saveApiResults('projected', session.profile.sub, apiGrant.expiresAt, memberUpdate, now, null);
+    const command = f.send.mock.calls[1]![0] as UpdateCommand;
+    expect(command.input.ConditionExpression).not.toContain('#writeRevision');
+    expect(command.input.ExpressionAttributeNames).not.toHaveProperty('#writeRevision');
+    expect(command.input.ExpressionAttributeValues).not.toHaveProperty(':expectedProfileWrite');
   });
 });
 

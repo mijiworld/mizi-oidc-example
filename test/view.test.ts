@@ -935,7 +935,7 @@ describe("server-rendered OIDC demo", () => {
         projectGoal: "assistant",
       });
       expect(html).toContain(`action="/refresh-${page}" method="post"`);
-      expect(html).not.toContain('action="/connect-');
+      expect(html).not.toContain(`action="/connect-${page}"`);
       expect(html).not.toContain(
         `action="/refresh-${page === "profile" ? "skills" : "profile"}"`,
       );
@@ -970,7 +970,7 @@ describe("server-rendered OIDC demo", () => {
         },
       });
       expect(html).toContain(`action="/refresh-${page}" method="post"`);
-      expect(html).not.toContain('action="/connect-');
+      expect(html).not.toContain(`action="/connect-${page}"`);
       expect(html).not.toContain("회원 API 조회 완료");
       expect(html).not.toContain("조회한 스킬 목록");
     },

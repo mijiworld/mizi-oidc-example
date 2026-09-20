@@ -181,7 +181,36 @@ function memberPanel(
     }
     ${apiAction(model, "profile", Boolean(member))}
     ${profileDetails(model)}
+    ${profileEditor(model)}
     <details class="developer-note"><summary>어떤 API와 권한을 쓰나요?</summary><p><code>user:profile</code> 권한으로 서버가 <code>GET /v1/me</code>와 <code>GET /v1/me/profile</code>을 호출합니다. 응답의 회원 ID를 로그인한 회원과 대조한 뒤 필요한 항목만 보관합니다. 다시 가져오기는 이 두 API만 갱신하고 스킬 목록은 유지합니다.</p><p>접근·갱신 토큰은 서버 전용 저장소에서만 사용합니다. 다시 가져올 때 필요한 토큰 갱신은 서버에서 처리하며 로그인과 프로젝트 선택을 유지합니다. 권한이 취소되거나 갱신할 수 없으면 다시 연결하기를 안내하고, 자동으로 미지에 이동하지 않습니다.</p><p>GitHub 연결 여부나 소개 내용은 스킬·개발 역량의 검증 결과가 아닙니다. 다시 연결할 때 스킬 조회 기록이 있다면 <code>user:skills</code>도 요청합니다. 같은 회원으로 재연결하고 기본 회원 조회가 성공하면 프로젝트 선택을 이어갑니다.</p></details>
+  </section>`;
+}
+
+function profileEditor(model: HomeViewModel): string {
+  const snapshot = model.profileDetails;
+  const ownSnapshot = snapshot?.status === "success" && snapshot.subject === model.profile?.sub ? snapshot : undefined;
+  const ready = model.apiConnection?.profileWrite === "ready";
+  const notice = model.profileWrite;
+  const messages = {
+    saved_verified: "미지에 저장하고, 다시 읽어 반영된 내용까지 확인했어요.",
+    saved_unverified: "미지에서 저장 완료 응답을 받았지만, 다시 읽어 확인하지 못했어요. 위의 ‘프로필 다시 가져오기’로 확인해 주세요.",
+    unknown: "저장 결과를 확인하지 못했어요. 이미 반영됐을 수 있으니 다시 저장하기 전에 프로필을 다시 가져와 확인해 주세요.",
+    not_saved: "미지에서 저장 요청을 거절했어요. 연결 권한과 입력 내용을 확인해 주세요.",
+  };
+  const draft = notice && notice.status !== "saved_verified" ? notice.draft : ownSnapshot?.profile.bio ?? "";
+  return `<section class="profile-editor" id="profile-editor" aria-labelledby="profile-editor-heading">
+    <h3 id="profile-editor-heading">내 소개 수정</h3>
+    <p class="subtle">소개를 바꾸고 저장하면 <strong>실제 미지 프로필</strong>에 반영됩니다. 기존 공개 설정에 따라 공개 프로필에도 표시됩니다.</p>
+    ${notice ? `<p class="${notice.status === "saved_verified" ? "snapshot-note" : "inline-error"}" role="${notice.status === "saved_verified" ? "status" : "alert"}">${escape(model.writeError ?? messages[notice.status])}</p><p class="fine">저장 요청 시각 · <time datetime="${escape(notice.attemptedAt)}">${escape(notice.attemptedAt)}</time> · UTC</p>` : ""}
+    ${ready && ownSnapshot ? `<form class="bio-form" action="/profile/bio" method="post">
+      <label for="profile-bio">미지에 표시할 내 소개</label>
+      <textarea id="profile-bio" name="bio" rows="5" maxlength="300" aria-describedby="profile-bio-help">${escape(draft)}</textarea>
+      <p class="fine" id="profile-bio-help">최대 300자. 일부 이모지는 2자로 계산됩니다. 빈칸으로 저장하면 소개가 지워집니다. 닉네임·관심 분야·공개 설정은 바꾸지 않습니다.</p>
+      <button class="button primary" type="submit">미지에 저장</button>
+    </form>` : ready ? `<p class="subtle">위의 ‘프로필 다시 가져오기’로 현재 소개를 확인한 뒤 수정해 주세요.</p>` : `<p class="subtle">먼저 미지에서 ‘내 소개 수정’을 허용해 주세요. 동의만으로 소개가 바뀌지는 않습니다.</p>
+      <form class="refresh-form" action="/connect-profile-write" method="post"><button class="button secondary" type="submit">내 소개 수정 허용하기</button></form>`}
+    ${notice && notice.status !== "saved_verified" && (!ready || !ownSnapshot) ? `<details class="developer-note"><summary>방금 입력한 소개 확인</summary><p class="bio">${escape(notice.draft) || "(빈 소개)"}</p></details>` : ""}
+    <p class="fine"><a href="/developers#dg-write">개발자: 소개 수정 API와 저장 확인 흐름</a></p>
   </section>`;
 }
 
@@ -207,7 +236,7 @@ function profileDetails(model: HomeViewModel): string {
     <p class="subtle">회원이 작성한 소개와 관심 분야입니다. 별도로 검증한 사실은 아닙니다.</p>
     <p class="fine">조회 시점의 정보 · <time datetime="${escape(details.fetchedAt)}">${escape(details.fetchedAt)}</time> · UTC</p>
     ${partialNotice(details.partial)}
-    <dl class="profile-data"><div><dt>소개</dt><dd class="bio">${bio?.trim() ? escape(bio) : "이번 응답에 소개 정보가 없어요."}</dd></div>
+    <dl class="profile-data"><div><dt>소개</dt><dd class="bio">${bio === null ? "이번 응답에 소개 정보가 없어요." : bio === "" ? "등록된 소개가 없어요." : escape(bio)}</dd></div>
       <div><dt>역할</dt><dd>${role?.trim() ? escape(role) : "이번 응답에 역할 정보가 없어요."}</dd></div>
       <div><dt>관심 분야</dt><dd>${interests === null ? "이번 응답에 관심 분야 정보가 없어요." : interests.length === 0 ? "이번 조회에서 관심 분야가 비어 있어요." : `<ul class="interests">${interests.map((interest) => `<li>${escape(interest)}</li>`).join("")}</ul>`}</dd></div></dl>
     <details class="developer-note"><summary>프로필 조회 기록</summary><dl class="data">${row("조회 대상 회원", details.subject)}${row("API", details.endpoint)}</dl></details>

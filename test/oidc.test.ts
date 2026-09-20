@@ -90,6 +90,11 @@ async function fixture(options: {
       user: { id: 'usr_verified', role: '개발자' }, bio: '작은 도구를 만들어요.', interests: ['웹'], partial: false,
       location: 'not-retained-location', contact_method: 'not-retained-contact',
     });
+    if (url === `${issuer}/v1/me/profile/bio`) {
+      expect(init?.method).toBe('PATCH');
+      const body = JSON.parse(String(init?.body)) as { bio: string };
+      return Response.json({ user: { id: 'usr_verified' }, bio: body.bio });
+    }
     if (url.startsWith(`${issuer}/v1/me/skills?limit=20&cursor=`) && options.laterSkillsStatus) {
       return Response.json({ error: 'not-retained-response' }, { status: options.laterSkillsStatus });
     }
@@ -218,6 +223,51 @@ describe('real OIDC library and independent RS256 verification', () => {
     expect(result.skillsApi).toMatchObject({ status: 'error', reason: 'scope_missing' });
     expect(f.calls.some((call) => call.url.includes('/me/skills'))).toBe(false);
     expect(result.apiGrant?.scope).toBe('openid profile user:profile');
+  });
+
+  it('requests and retains bio write authority only after an explicit write-consent attempt', async () => {
+    const scope = 'openid profile user:profile user:skills user:profile:write';
+    const f = await fixture({ tokenScope: scope });
+    const requested: Attempt = { ...attempt, readMemberApi: true, readProfileDetails: true,
+      readSkillsApi: true, writeProfileBio: true };
+    const resources = [`${issuer}/v1/me`, `${issuer}/v1/me/profile`, `${issuer}/v1/me/skills`, `${issuer}/v1/me/profile/bio`];
+    const auth = new URL(await f.provider.authorizationUrl(requested));
+    expect(auth.searchParams.get('scope')).toBe(scope);
+    expect(auth.searchParams.getAll('resource')).toEqual(resources);
+    const identity = await f.provider.complete(callback(), requested);
+    expect(identity.apiGrant?.scope).toBe(scope);
+    expect(identity.apiGrant?.resources).toEqual(resources);
+    const tokenCall = f.calls.find((call) => call.url === `${issuer}/token`)!;
+    expect(new URLSearchParams(String(tokenCall.init?.body)).getAll('resource')).toEqual(resources);
+    expect(f.calls.some((call) => call.init?.method === 'PATCH')).toBe(false);
+    const normalAuth = new URL(await f.provider.authorizationUrl({ ...attempt, readMemberApi: true, readProfileDetails: true }));
+    expect(normalAuth.searchParams.get('scope')).toBe('openid profile user:profile');
+    expect(normalAuth.searchParams.getAll('resource')).not.toContain(`${issuer}/v1/me/profile/bio`);
+  });
+
+  it('does not retain unsolicited write scope on an ordinary API connection', async () => {
+    const f = await fixture({ tokenScope: 'openid profile user:profile user:profile:write' });
+    const identity = await f.provider.complete(callback(), { ...attempt, readMemberApi: true, readProfileDetails: true });
+    expect(identity.apiGrant).toBeUndefined();
+    expect(identity.verification.signature).toBe(true);
+    expect(f.calls.some((call) => call.init?.method === 'PATCH')).toBe(false);
+  });
+
+  it('uses explicit write authority only when the caller invokes writeProfileBio', async () => {
+    const scope = 'openid profile user:profile user:profile:write';
+    const f = await fixture({ tokenScope: scope,
+      detailsProfile: { user: { id: 'usr_verified' }, bio: '새 소개', interests: [], partial: false } });
+    const identity = await f.provider.complete(callback(), {
+      ...attempt, readMemberApi: true, readProfileDetails: true, writeProfileBio: true,
+    });
+    f.calls.length = 0;
+    expect((await f.provider.readApis(identity.apiGrant!, 'profile')).profileDetails?.status).toBe('success');
+    expect(f.calls.some((call) => call.init?.method === 'PATCH')).toBe(false);
+    f.calls.length = 0;
+    expect(await f.provider.writeProfileBio(identity.apiGrant!, '새 소개')).toMatchObject({ status: 'saved_verified', bio: '새 소개' });
+    expect(f.calls.map((call) => [call.url, call.init?.method])).toEqual([
+      [`${issuer}/v1/me/profile/bio`, 'PATCH'], [`${issuer}/v1/me/profile`, 'GET'],
+    ]);
   });
 
   it.each([[401, 'unauthorized'], [403, 'forbidden']] as const)('keeps initial verified skills but does not retain a grant denied on a later page (%s)', async (laterSkillsStatus, authorizationFailure) => {
@@ -380,6 +430,7 @@ function renewalFixture(options: {
   userInfoStatus?: number; userInfoSubject?: string; userInfoUnavailable?: boolean;
   discoveryFailure?: boolean; discoveryEndpoint?: string;
   tokenResponse?: () => Response; userInfoResponse?: () => Response;
+  expectedResources?: string[];
 } = {}) {
   const calls: { url: string; init?: RequestInit }[] = [];
   const fetcher: typeof fetch = vi.fn(async (input, init) => {
@@ -401,7 +452,7 @@ function renewalFixture(options: {
       expect(form.get('client_id')).toBe(clientId); // CIMD public client has no secret.
       expect(form.get('grant_type')).toBe('refresh_token');
       expect(form.get('refresh_token')).toBe(refresh);
-      expect(form.getAll('resource')).toEqual(renewalResources);
+      expect(form.getAll('resource')).toEqual(options.expectedResources ?? renewalResources);
       for (const field of ['client_secret', 'code', 'code_verifier', 'redirect_uri']) expect(form.has(field)).toBe(false);
       if (options.tokenUnavailable) throw new Error(`private upstream detail ${refresh}`);
       if (options.tokenResponse) return options.tokenResponse();
@@ -423,6 +474,29 @@ function renewalFixture(options: {
 }
 
 describe('server-only refresh-token rotation', () => {
+  it('preserves explicitly granted write scope and its fixed resource without performing a write', async () => {
+    const resources = [...renewalResources, `${issuer}/v1/me/profile/bio`];
+    const scope = 'openid profile user:profile user:skills user:profile:write';
+    const f = renewalFixture({ expectedResources: resources, tokenBody: {
+      access_token: 'renewed-private-access', refresh_token: 'renewed-private-refresh', token_type: 'Bearer', expires_in: 3600, scope,
+    } });
+    const renewed = await f.provider.refreshGrant({ ...storedGrant(), resources, scope });
+    expect(renewed.resources).toEqual(resources);
+    expect(renewed.scope).toBe(scope);
+    expect(f.calls.some((call) => call.init?.method === 'PATCH')).toBe(false);
+    const tokenCall = f.calls.find((call) => call.url.endsWith('/token'))!;
+    expect(new URLSearchParams(String(tokenCall.init?.body)).get('scope')).toBe(scope);
+  });
+
+  it('rejects a refresh response that adds write scope to an existing read-only grant', async () => {
+    const f = renewalFixture({ tokenBody: {
+      access_token: 'renewed-private-access', refresh_token: 'renewed-private-refresh', token_type: 'Bearer', expires_in: 3600,
+      scope: 'openid profile user:profile user:skills user:profile:write',
+    } });
+    await expect(f.provider.refreshGrant(storedGrant()))
+      .rejects.toMatchObject({ name: 'ApiGrantRefreshFailure', reason: 'invalid_response' });
+    expect(f.calls.some((call) => call.url.endsWith('/userinfo'))).toBe(false);
+  });
   it('renews an expired access token via the pinned public-client endpoint and verifies its subject', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     const previous = storedGrant();

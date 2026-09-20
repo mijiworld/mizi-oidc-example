@@ -1,3 +1,4 @@
+import type { ProfileWriteNotice } from './profile-write-notice.js';
 import type { MemberApiResult, ProjectGoal } from './service.js';
 import type { ProfileDetailsResult, SkillsApiResult } from './extra-api-model.js';
 
@@ -40,9 +41,12 @@ export interface HomeViewModel {
   profileDetails?: ProfileDetailsResult;
   skillsApi?: SkillsApiResult;
   projectGoal?: ProjectGoal;
+  profileWrite?: ProfileWriteNotice;
+  writeError?: string;
   apiConnection?: {
     profile: 'ready' | 'connect' | 'reconnect';
     skills: 'ready' | 'connect' | 'reconnect';
+    profileWrite?: 'ready' | 'connect';
   };
   refreshFeedback?: 'updated' | 'partial' | 'unavailable' | 'reconnect_required' | 'invalid_response';
   serviceError?: string;

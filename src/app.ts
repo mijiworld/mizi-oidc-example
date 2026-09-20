@@ -1,3 +1,5 @@
+import { z } from 'zod';
+import type { ProfileBioWriteResult } from './profile-write.js';
 import { randomBytes } from 'node:crypto';
 import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -35,6 +37,7 @@ function apiConnection(session: Session, config: Config): NonNullable<HomeViewMo
   return {
     profile: ready('user:profile', ['/v1/me', '/v1/me/profile']) ? 'ready'
       : session.memberApi || session.profileDetails ? 'reconnect' : 'connect',
+    profileWrite: ready('user:profile:write', ['/v1/me/profile/bio']) && ready('user:profile', ['/v1/me/profile']) ? 'ready' : 'connect',
     skills: ready('user:skills', ['/v1/me/skills']) ? 'ready' : session.skillsApi ? 'reconnect' : 'connect',
   };
 }
@@ -81,7 +84,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     client_id: `${config.baseUrl}/client.json`, client_name: 'MiZi OIDC 로그인 예제',
     client_uri: config.baseUrl, redirect_uris: [config.callbackUrl],
     token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'],
-    scope: 'openid profile user:profile user:skills',
+    scope: 'openid profile user:profile user:skills user:profile:write',
   }));
   // Public documentation never reads a member session or calls the provider.
   app.get('/developers', (c) => {
@@ -116,7 +119,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
       issuer: config.issuer, clientId: config.clientId, baseUrl: config.baseUrl,
       loginAction: '/login', logoutAction: '/logout', authenticated: Boolean(session),
       ...(session ? { profile: session.profile, verification: session.verification,
-        memberApi: session.memberApi, projectGoal: session.projectGoal,
+        memberApi: session.memberApi, projectGoal: session.projectGoal, profileWrite: session.profileWrite,
         profileDetails: session.profileDetails, skillsApi: session.skillsApi, apiConnection: apiConnection(session, config) } : {}),
       ...(session && refreshFeedback.some((value) => value === c.req.query('api_status'))
         ? { refreshFeedback: c.req.query('api_status') as typeof refreshFeedback[number] } : {}),
@@ -126,7 +129,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
   }
   for (const [path, name] of Object.entries(pages)) app.get(path, (c) => page(c, name));
 
-  async function startLogin(c: Context, returnPage?: 'profile' | 'skills') {
+  async function startLogin(c: Context, returnPage?: 'profile' | 'skills', writeProfileBio = false) {
     if (c.req.header('Origin') !== config.baseUrl) return c.text('허용되지 않은 요청입니다.', 403);
     let readSkillsApi = returnPage === 'skills';
     if (returnPage) {
@@ -141,7 +144,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
     const attempt = {
       state: random(), nonce: random(), codeVerifier: random(), bindingHash: digest(binding),
       expiresAt: seconds() + ATTEMPT_TTL_SECONDS,
-      ...(returnPage ? { readMemberApi: true, readProfileDetails: true, readSkillsApi, returnPage } : {}),
+      ...(returnPage ? { readMemberApi: true, readProfileDetails: true, readSkillsApi, returnPage, ...(writeProfileBio ? { writeProfileBio: true } : {}) } : {}),
     };
     let stage: LoginStage = 'discovery';
     try {
@@ -158,6 +161,7 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
   app.post('/login', (c) => startLogin(c));
   app.post('/connect-profile', (c) => startLogin(c, 'profile'));
   app.post('/connect-skills', (c) => startLogin(c, 'skills'));
+  app.post('/connect-profile-write', (c) => startLogin(c, 'profile', true));
 
   async function refresh(c: Context, page: ApiRefreshPage) {
     if (c.req.header('Origin') !== config.baseUrl) return c.text('허용되지 않은 요청입니다.', 403);
@@ -187,8 +191,9 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
       if (!Object.keys(patch).length) return finish(requested.some((value) => value?.status === 'error' &&
         value.reason === 'invalid_response') ? 'invalid_response' : 'unavailable');
       const checked = checkedApiPatch(patch, session.profile.sub);
-      if (!await store.saveApiResults(id, session.profile.sub, grant.expiresAt, checked, seconds())) {
-        return finish('reconnect_required');
+      if (!await store.saveApiResults(id, session.profile.sub, grant.expiresAt, checked, seconds(), session.profileWriteRevision ?? null)) {
+        const latest = await store.getApiGrant(id, session.profile.sub, seconds());
+        return finish(latest ? 'invalid_response' : 'reconnect_required');
       }
       const partial = requested.some((value) => !value || value.status === 'error') ||
         (patch.profileDetails?.status === 'success' && patch.profileDetails.partial === true) ||
@@ -205,6 +210,67 @@ export function createApp(config: Config, store: Store, oidc: OidcProvider) {
   }
   app.post('/refresh-profile', (c) => refresh(c, 'profile'));
   app.post('/refresh-skills', (c) => refresh(c, 'skills'));
+
+  app.post('/profile/bio', bodyLimit({ maxSize: 4096,
+    onError: (c) => c.text('요청 내용이 너무 큽니다.', 413) }), async (c) => {
+    if (c.req.header('Origin') !== config.baseUrl) return c.text('허용되지 않은 요청입니다.', 403);
+    const id = getCookie(c, sessionCookie);
+    const session = await currentSession(c, id);
+    if (!id || !session) return c.redirect(`${config.baseUrl}/?service_error=session_expired`, 303);
+    if (c.req.header('Content-Type')?.split(';')[0]?.trim() !== 'application/x-www-form-urlencoded') {
+      return c.text('지원하지 않는 요청 형식입니다.', 415);
+    }
+    const body = new URLSearchParams(await c.req.text());
+    const bio = z.string().refine((value) => value.length <= 300).safeParse(body.get('bio'));
+    if (!bio.success || Array.from(body.entries()).length !== 1) return c.text('소개는 300자 이내로 입력해 주세요.', 400);
+    const reconnect = () => c.redirect(`${config.baseUrl}/profile?api_status=reconnect_required#profile-editor`, 303);
+    if (session.profileDetails?.status !== 'success' || session.profileDetails.subject !== session.profile.sub) return reconnect();
+    // Before PATCH, a local failure can safely retain the draft in the rendered
+    // form without claiming that a write was sent. Never redirect away silently.
+    const preflightFailure = (needsConnection: boolean) => {
+      c.header('Referrer-Policy', 'strict-origin');
+      return c.html(renderHome({ page: 'profile', issuer: config.issuer, clientId: config.clientId,
+        baseUrl: config.baseUrl, loginAction: '/login', logoutAction: '/logout', authenticated: true,
+        profile: session.profile, verification: session.verification, memberApi: session.memberApi,
+        profileDetails: session.profileDetails, skillsApi: session.skillsApi, projectGoal: session.projectGoal,
+        apiConnection: { ...apiConnection(session, config), ...(needsConnection ? { profileWrite: 'connect' as const } : {}) },
+        profileWrite: { id: random(), status: 'not_saved', draft: bio.data, attemptedAt: new Date().toISOString() },
+        writeError: needsConnection ? '소개를 보내기 전에 연결이 만료됐어요. 입력한 내용은 아래에 남겨두었습니다. 복사해 두고 수정 권한을 다시 연결해 주세요.'
+          : '소개를 보내기 전에 연결을 준비하지 못했어요. 입력한 내용을 유지했으니 잠시 후 다시 저장해 주세요.',
+      }), 503);
+    };
+    if (apiConnection(session, config).profileWrite !== 'ready') return preflightFailure(true);
+    let grant: ApiGrant;
+    try { grant = await usableApiGrant(store, oidc, id, session, seconds); }
+    catch (error) { return preflightFailure(error instanceof ApiGrantUnavailable); }
+    if (!oidc.writeProfileBio) return c.text('소개 수정을 잠시 이용할 수 없습니다.', 503);
+    let result: ProfileBioWriteResult;
+    try { result = await oidc.writeProfileBio(grant, bio.data); }
+    catch (error) {
+      if (error instanceof ApiGrantUnavailable) return preflightFailure(true);
+      result = { status: 'unknown', reason: 'unavailable' };
+    }
+    // The receipt and verified snapshot share one conditional update. A logout or
+    // credential replacement during the request must never recreate a session.
+    const notice = { id: random(), status: result.status, draft: bio.data, attemptedAt: new Date().toISOString() };
+    const discard = (result.status === 'not_saved' && ['unauthorized', 'forbidden'].includes(result.reason)) ||
+      (result.status === 'saved_unverified' && Boolean(result.authorizationFailure)) ||
+      ('reason' in result && result.reason === 'identity_mismatch');
+    let recorded = false;
+    try {
+      recorded = await store.saveProfileWrite(id, session.profile.sub, grant.accessToken, notice,
+        result.status === 'saved_verified' ? result.profileDetails : undefined, seconds(), session.profileWriteRevision ?? null);
+    } catch {
+      // PATCH may already have succeeded. Do not retry or claim it was rejected.
+    } finally {
+      if (discard) {
+        try { await store.clearApiGrant(id, session.profile.sub, seconds(), grant.accessToken); }
+        catch { recorded = false; }
+      }
+    }
+    if (!recorded) return c.text('저장 결과를 이 세션에서 확인하지 못했습니다. 미지에 반영됐을 수 있으니 내 정보를 다시 가져와 확인해 주세요.', 409);
+    return c.redirect(`${config.baseUrl}/profile#profile-editor`, 303);
+  });
 
   app.post('/service/goal', bodyLimit({ maxSize: 1024,
     onError: (c) => c.text('요청 내용이 너무 큽니다.', 413) }), async (c) => {

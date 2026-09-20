@@ -1,5 +1,5 @@
 import type { Config } from './config.js';
-import { apiGrantSchema, ApiGrantUnavailable, type ApiGrant, type ApiRefreshPage, type ApiRefreshResult } from './api-grant.js';
+import { apiGrantSchema, ApiGrantUnavailable, profileBioResource, type ApiGrant, type ApiRefreshPage, type ApiRefreshResult } from './api-grant.js';
 import { memberApiResource, readMemberApi } from './member-api.js';
 import { profileDetailsResource, skillsApiResource, readProfileDetails, readSkillsApi } from './extra-api.js';
 import type { MemberApiResult } from './service.js';
@@ -26,7 +26,7 @@ export function validateApiGrant(
   const member = memberApiResource(settings.issuer);
   const profile = profileDetailsResource(settings.issuer);
   const skills = skillsApiResource(settings.issuer);
-  const allowed = [member, profile, skills];
+  const allowed = [member, profile, skills, profileBioResource(settings.issuer)];
   if (grant.resources.some((resource) => !allowed.includes(resource))) throw new ApiGrantUnavailable('invalid_grant');
   return grant;
 }
