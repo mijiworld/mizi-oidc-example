@@ -8,9 +8,10 @@ import type { Identity } from './view-model.js';
 import { LoginFailure, type LoginStage } from './login-error.js';
 import { memberApiResource, readMemberApi } from './member-api.js';
 import { profileDetailsResource, skillsApiResource, readProfileDetails, readSkillsApi } from './extra-api.js';
-import { API_GRANT_MAX_SECONDS, ApiGrantRefreshFailure, apiGrantSchema, type ApiGrant, type ApiRefreshPage, type ApiRefreshResult } from './api-grant.js';
+import { API_GRANT_MAX_SECONDS, ApiGrantRefreshFailure, apiGrantSchema, profileBioResource, type ApiGrant, type ApiRefreshPage, type ApiRefreshResult } from './api-grant.js';
 import { refreshApis, validateApiGrant } from './api-refresh.js';
 import { SESSION_ABSOLUTE_SECONDS } from './session-policy.js';
+import { writeProfileBio, type ProfileBioWriteResult } from './profile-write.js';
 
 export type OidcIdentity = Identity & { apiGrant?: ApiGrant };
 
@@ -19,6 +20,7 @@ export interface OidcProvider {
   complete(callback: URL, attempt: Attempt): Promise<OidcIdentity>;
   readApis?(grant: ApiGrant, page: ApiRefreshPage): Promise<ApiRefreshResult>;
   refreshGrant?(grant: ApiGrant): Promise<ApiGrant>;
+  writeProfileBio?(grant: ApiGrant, bio: string): Promise<ProfileBioWriteResult>;
 }
 
 const claimsSchema = z.object({
@@ -43,11 +45,12 @@ function withinRefreshBudget<T>(operation: Promise<T>, signal: AbortSignal): Pro
     operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', expired));
   });
 }
-const supportedScopes = new Set(['openid', 'profile', 'user:profile', 'user:skills']);
+const supportedScopes = new Set(['openid', 'profile', 'user:profile', 'user:skills', 'user:profile:write']);
 const hasApiScope = (scope: string[], resources: string[], issuer: string): boolean =>
   (scope.includes('user:profile') && resources.some((resource) =>
     [memberApiResource(issuer), profileDetailsResource(issuer)].includes(resource))) ||
-  (scope.includes('user:skills') && resources.includes(skillsApiResource(issuer)));
+  (scope.includes('user:skills') && resources.includes(skillsApiResource(issuer))) ||
+  (scope.includes('user:profile:write') && resources.includes(profileBioResource(issuer)));
 
 /** Use the same fixed resource list at authorization and code exchange. */
 function apiResources(issuer: string, attempt: Attempt): string[] {
@@ -55,6 +58,7 @@ function apiResources(issuer: string, attempt: Attempt): string[] {
     ...(attempt.readMemberApi ? [memberApiResource(issuer)] : []),
     ...(attempt.readProfileDetails ? [profileDetailsResource(issuer)] : []),
     ...(attempt.readSkillsApi ? [skillsApiResource(issuer)] : []),
+    ...(attempt.writeProfileBio ? [profileBioResource(issuer)] : []),
   ];
 }
 
@@ -115,7 +119,8 @@ export class MiziOidcProvider implements OidcProvider {
       redirect_uri: this.settings.callbackUrl,
       scope: ['openid', 'profile',
         ...(attempt.readMemberApi || attempt.readProfileDetails ? ['user:profile'] : []),
-        ...(attempt.readSkillsApi ? ['user:skills'] : [])].join(' '), response_type: 'code',
+        ...(attempt.readSkillsApi ? ['user:skills'] : []),
+        ...(attempt.writeProfileBio ? ['user:profile:write'] : [])].join(' '), response_type: 'code',
       state: attempt.state, nonce: attempt.nonce,
       code_challenge: await client.calculatePKCECodeChallenge(attempt.codeVerifier),
       code_challenge_method: 'S256',
@@ -127,6 +132,10 @@ export class MiziOidcProvider implements OidcProvider {
 
   async readApis(grant: ApiGrant, page: ApiRefreshPage): Promise<ApiRefreshResult> {
     return refreshApis(this.settings, grant, page, this.fetcher);
+  }
+
+  async writeProfileBio(grant: ApiGrant, bio: string): Promise<ProfileBioWriteResult> {
+    return writeProfileBio(this.settings, grant, bio, this.fetcher);
   }
 
   /** The store must lease/CAS this operation: a refresh token rotates on every use. */
@@ -287,7 +296,8 @@ export class MiziOidcProvider implements OidcProvider {
       // The refresh credential is private too; ID tokens are never retained.
       const scopes = tokens.scope?.split(' ') ?? [];
       const hasApiPermission = ((attempt.readMemberApi || attempt.readProfileDetails) && scopes.includes('user:profile')) ||
-        (attempt.readSkillsApi && scopes.includes('user:skills'));
+        (attempt.readSkillsApi && scopes.includes('user:skills')) ||
+        (attempt.writeProfileBio && scopes.includes('user:profile:write'));
       const expiresIn = tokens.expires_in;
       const denied = [memberApi, profileDetails, skillsApi].some((result) => result?.status === 'error' &&
         (result.reason === 'unauthorized' || result.reason === 'forbidden')) ||
@@ -296,7 +306,8 @@ export class MiziOidcProvider implements OidcProvider {
         ? tokenReceivedAt + Math.min(Math.floor(expiresIn), API_GRANT_MAX_SECONDS) : 0;
       const requestedScopes = ['openid', 'profile',
         ...(attempt.readMemberApi || attempt.readProfileDetails ? ['user:profile'] : []),
-        ...(attempt.readSkillsApi ? ['user:skills'] : [])];
+        ...(attempt.readSkillsApi ? ['user:skills'] : []),
+        ...(attempt.writeProfileBio ? ['user:profile:write'] : [])];
       const grant = hasApiPermission && scopes.every((scope) => requestedScopes.includes(scope)) &&
         !denied && expiresAt > Math.floor(Date.now() / 1000)
         ? apiGrantSchema.safeParse({ accessToken: tokens.access_token, scope: tokens.scope,

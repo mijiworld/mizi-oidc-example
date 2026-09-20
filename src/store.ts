@@ -5,6 +5,8 @@ import { memberApiResultSchema, projectGoalSchema, type ProjectGoal } from './se
 import { profileDetailsResultSchema, skillsApiResultSchema } from './extra-api-model.js';
 import { apiGrantSchema, type ApiGrant } from './api-grant.js';
 import { apiAccessSchema, publicApiAccess, checkedApiGrant, checkedApiPatch, type ApiAccess, type ApiSnapshotPatch } from './session-api.js';
+import { profileWriteNoticeSchema, checkedProfileWrite, type ProfileWriteNotice } from './profile-write-notice.js';
+import type { ProfileDetailsResult } from './extra-api-model.js';
 import { API_REFRESH_LEASE_SECONDS, SESSION_IDLE_SECONDS } from './session-policy.js';
 
 export const ATTEMPT_TTL_SECONDS = 600;
@@ -20,10 +22,11 @@ export const attemptSchema = z.object({
   readMemberApi: z.boolean().optional(),
   readProfileDetails: z.boolean().optional(),
   readSkillsApi: z.boolean().optional(),
+  writeProfileBio: z.boolean().optional(),
   returnPage: z.enum(['profile', 'skills']).optional(),
 });
 export type Attempt = z.infer<typeof attemptSchema>;
-export interface Session extends Identity { expiresAt: number; createdAt?: number; absoluteExpiresAt?: number; projectGoal?: ProjectGoal; apiAccess?: ApiAccess }
+export interface Session extends Identity { expiresAt: number; createdAt?: number; absoluteExpiresAt?: number; projectGoal?: ProjectGoal; apiAccess?: ApiAccess; profileWrite?: ProfileWriteNotice; profileWriteRevision?: string }
 export const sessionSchema: z.ZodType<Session> = z.object({
   expiresAt: z.number().int().positive(),
   createdAt: z.number().int().positive().optional(),
@@ -34,6 +37,9 @@ export const sessionSchema: z.ZodType<Session> = z.object({
   skillsApi: skillsApiResultSchema.optional(),
   projectGoal: projectGoalSchema.optional(),
   apiAccess: apiAccessSchema.optional(),
+  profileWrite: profileWriteNoticeSchema.optional(),
+  // Keep the revision after dismissing the receipt so an older read cannot pass an absent-receipt CAS again.
+  profileWriteRevision: opaqueSchema.optional(),
   verification: z.object({
     issuer: z.string(), audience: z.string(), sub: z.string().min(1), algorithm: z.literal('RS256'),
     nonce: z.literal(true), pkce: z.literal('S256'), state: z.literal(true), issuerResponse: z.literal(true),
@@ -64,7 +70,8 @@ export interface Store {
   finishApiRefresh(id: string, subject: string, accessToken: string, owner: string, grant: ApiGrant, now: number): Promise<boolean>;
   abortApiRefresh(id: string, subject: string, accessToken: string, owner: string, discard: boolean, now: number): Promise<void>;
   clearApiGrant(id: string, subject: string, now: number, expectedToken?: string): Promise<void>;
-  saveApiResults(id: string, subject: string, grantExpiresAt: number, patch: ApiSnapshotPatch, now: number): Promise<boolean>;
+  saveApiResults(id: string, subject: string, grantExpiresAt: number, patch: ApiSnapshotPatch, now: number, expectedProfileWrite?: string | null): Promise<boolean>;
+  saveProfileWrite(id: string, subject: string, expectedToken: string, notice: ProfileWriteNotice, details: ProfileDetailsResult | undefined, now: number, expectedProfileWrite?: string | null): Promise<boolean>;
   deleteSession(id: string): Promise<void>;
   setProjectGoal(id: string, subject: string, goal: ProjectGoal, now: number): Promise<boolean>;
 }
@@ -165,14 +172,30 @@ export class MemoryStore implements Store {
     this.refreshes.delete(key);
     delete session.apiAccess;
   }
-  async saveApiResults(id: string, subject: string, grantExpiresAt: number, input: ApiSnapshotPatch, now: number): Promise<boolean> {
+  async saveApiResults(id: string, subject: string, grantExpiresAt: number, input: ApiSnapshotPatch, now: number, expectedProfileWrite?: string | null): Promise<boolean> {
     const patch = checkedApiPatch(input, subject);
     const key = digest(id);
     const session = this.sessions.get(key);
     const grant = this.grants.get(key);
     if (!session || session.expiresAt <= now || session.profile.sub !== subject || !grant ||
         grant.subject !== subject || grant.expiresAt <= now || grant.expiresAt !== grantExpiresAt) return false;
+    if (patch.profileDetails && expectedProfileWrite !== undefined &&
+        (session.profileWriteRevision ?? null) !== expectedProfileWrite) return false;
     Object.assign(session, structuredClone(patch));
+    if (patch.profileDetails) delete session.profileWrite;
+    return true;
+  }
+  async saveProfileWrite(id: string, subject: string, expectedToken: string, notice: ProfileWriteNotice, details: ProfileDetailsResult | undefined, now: number, expectedProfileWrite?: string | null): Promise<boolean> {
+    const checked = checkedProfileWrite(notice, subject, details);
+    const key = digest(id);
+    const session = this.sessions.get(key);
+    const grant = this.grants.get(key);
+    if (!session || session.expiresAt <= now || session.profile.sub !== subject ||
+        grant?.subject !== subject || grant.accessToken !== expectedToken) return false;
+    if (expectedProfileWrite !== undefined && (session.profileWriteRevision ?? null) !== expectedProfileWrite) return false;
+    session.profileWrite = structuredClone(checked.notice);
+    session.profileWriteRevision = checked.notice.id;
+    if (checked.details) session.profileDetails = structuredClone(checked.details);
     return true;
   }
   async deleteSession(id: string): Promise<void> {

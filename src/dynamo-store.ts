@@ -4,6 +4,8 @@ import { attemptSchema, digest, sessionSchema, type Attempt, type Session, type 
 import { projectGoalSchema, type ProjectGoal } from './service.js';
 import { type ApiGrant } from './api-grant.js';
 import { publicApiAccess, checkedApiGrant, checkedApiPatch, privateApiRecordSchema, type ApiSnapshotPatch } from './session-api.js';
+import { checkedProfileWrite, type ProfileWriteNotice } from './profile-write-notice.js';
+import type { ProfileDetailsResult } from './extra-api-model.js';
 import { API_REFRESH_LEASE_SECONDS, SESSION_IDLE_SECONDS } from './session-policy.js';
 
 export class DynamoStore implements Store {
@@ -55,10 +57,10 @@ export class DynamoStore implements Store {
   async getSession(id: string, now: number): Promise<Session | null> {
     const result = await this.db.send(new GetCommand({
       TableName: this.table, Key: { pk: `session:${digest(id)}` }, ConsistentRead: true,
-      ProjectionExpression: '#expires, #profile, #verification, #member, #details, #skills, #goal, #access, #created, #absolute',
+      ProjectionExpression: '#expires, #profile, #verification, #member, #details, #skills, #goal, #access, #created, #absolute, #write, #writeRevision',
       ExpressionAttributeNames: { '#expires': 'expiresAt', '#profile': 'profile', '#verification': 'verification',
         '#member': 'memberApi', '#details': 'profileDetails', '#skills': 'skillsApi', '#goal': 'projectGoal', '#access': 'apiAccess',
-        '#created': 'createdAt', '#absolute': 'absoluteExpiresAt' },
+        '#created': 'createdAt', '#absolute': 'absoluteExpiresAt', '#write': 'profileWrite', '#writeRevision': 'profileWriteRevision' },
     }));
     const parsed = sessionSchema.safeParse(result.Item);
     return parsed.success && parsed.data.expiresAt > now ? parsed.data : null;
@@ -178,7 +180,7 @@ export class DynamoStore implements Store {
       if (!(error instanceof Error && error.name === 'ConditionalCheckFailedException')) throw error;
     }
   }
-  async saveApiResults(id: string, subject: string, grantExpiresAt: number, input: ApiSnapshotPatch, now: number): Promise<boolean> {
+  async saveApiResults(id: string, subject: string, grantExpiresAt: number, input: ApiSnapshotPatch, now: number, expectedProfileWrite?: string | null): Promise<boolean> {
     const patch = checkedApiPatch(input, subject);
     const names: Record<string, string> = { '#grant': 'apiGrant', '#grantSubject': 'subject',
       '#grantExpiry': 'expiresAt', '#profile': 'profile', '#sub': 'sub' };
@@ -188,13 +190,43 @@ export class DynamoStore implements Store {
       values[`:field${i}`] = value;
       return `#field${i} = :field${i}`;
     });
+    if (patch.profileDetails) names['#write'] = 'profileWrite';
+    let writeCondition = '';
+    if (patch.profileDetails && expectedProfileWrite !== undefined) {
+      names['#writeRevision'] = 'profileWriteRevision';
+      if (expectedProfileWrite === null) writeCondition = ' AND attribute_not_exists(#writeRevision)';
+      else {
+        writeCondition = ' AND #writeRevision = :expectedProfileWrite';
+        values[':expectedProfileWrite'] = expectedProfileWrite;
+      }
+    }
     try {
       await this.db.send(new UpdateCommand({
         TableName: this.table, Key: { pk: `session:${digest(id)}` },
-        UpdateExpression: `SET ${assignments.join(', ')}`,
+        UpdateExpression: `SET ${assignments.join(', ')}${patch.profileDetails ? ' REMOVE #write' : ''}`,
         // A logout, revocation or expiry while the API is in flight must win.
-        ConditionExpression: 'attribute_exists(pk) AND expiresAt > :now AND #profile.#sub = :subject AND #grant.#grantSubject = :subject AND #grant.#grantExpiry = :grantExpiry AND #grant.#grantExpiry > :now',
+        ConditionExpression: 'attribute_exists(pk) AND expiresAt > :now AND #profile.#sub = :subject AND #grant.#grantSubject = :subject AND #grant.#grantExpiry = :grantExpiry AND #grant.#grantExpiry > :now' + writeCondition,
         ExpressionAttributeNames: names, ExpressionAttributeValues: values,
+      }));
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') return false;
+      throw error;
+    }
+  }
+  async saveProfileWrite(id: string, subject: string, expectedToken: string, notice: ProfileWriteNotice, details: ProfileDetailsResult | undefined, now: number, expectedProfileWrite?: string | null): Promise<boolean> {
+    const checked = checkedProfileWrite(notice, subject, details);
+    try {
+      await this.db.send(new UpdateCommand({
+        TableName: this.table, Key: { pk: `session:${digest(id)}` },
+        UpdateExpression: 'SET #write = :write, #writeRevision = :writeRevision' + (checked.details ? ', #details = :details' : ''),
+        ConditionExpression: 'attribute_exists(pk) AND expiresAt > :now AND #profile.#sub = :subject AND #grant.#subject = :subject AND #grant.#token = :token' +
+          (expectedProfileWrite === undefined ? '' : expectedProfileWrite === null ? ' AND attribute_not_exists(#writeRevision)' : ' AND #writeRevision = :expectedProfileWrite'),
+        ExpressionAttributeNames: { '#write': 'profileWrite', '#writeRevision': 'profileWriteRevision', '#profile': 'profile', '#sub': 'sub',
+          '#grant': 'apiGrant', '#subject': 'subject', '#token': 'accessToken', ...(checked.details ? { '#details': 'profileDetails' } : {}) },
+        ExpressionAttributeValues: { ':write': checked.notice, ':writeRevision': checked.notice.id, ':now': now, ':subject': subject,
+          ':token': expectedToken, ...(checked.details ? { ':details': checked.details } : {}),
+          ...(typeof expectedProfileWrite === 'string' ? { ':expectedProfileWrite': expectedProfileWrite } : {}) },
       }));
       return true;
     } catch (error) {

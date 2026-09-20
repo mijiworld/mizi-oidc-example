@@ -37,12 +37,12 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
     <div class="dg-hero">
       <p class="eyebrow">Developer guide · MiZi API</p>
       <h1 id="developer-title">미지 로그인에서<br>내 서비스까지.</h1>
-      <p class="lead">사용자가 허용한 정보만 읽어 여러분의 서비스에 연결하세요. 이 페이지는 데모가 사용하는 인증 흐름과 세 가지 읽기 API를 설명합니다. 로그인 없이 볼 수 있습니다.</p>
+      <p class="lead">사용자가 허용한 정보만 읽어 여러분의 서비스에 연결하세요. 이 페이지는 데모가 사용하는 인증 흐름, 세 가지 읽기 API, 내 소개 수정 API를 설명합니다. 로그인 없이 볼 수 있습니다.</p>
       <div class="dg-links"><a href="/">데모 홈으로 돌아가기</a>${link(`${SOURCE}#quickstart`, 'GitHub에서 시작하기')}${link(GUIDE, '미지 OIDC 가이드')}<div class="dg-discovery-link">${link(discovery, '로그인 연동 설정(JSON) 보기')}<p>로그인 라이브러리가 자동으로 읽는 서버 설정입니다.</p></div></div>
     </div>
     <nav class="dg-toc" aria-label="API 가이드 목차"><strong>필요한 부분부터 읽기</strong><ol>
       <li><a href="#dg-start">시작하기</a></li><li><a href="#dg-auth">로그인과 권한</a></li><li><a href="#dg-session">로그인 유지 정책</a></li><li><a href="#dg-api">API 규격</a></li>
-      <li><a href="#dg-fetch">서버 호출 예제</a></li><li><a href="#dg-pagination">스킬 페이지 조회</a></li><li><a href="#dg-errors">오류와 저장 정책</a></li><li><a href="#dg-source">실제 코드</a></li>
+      <li><a href="#dg-write">내 소개 수정</a></li><li><a href="#dg-fetch">서버 호출 예제</a></li><li><a href="#dg-pagination">스킬 페이지 조회</a></li><li><a href="#dg-errors">오류와 저장 정책</a></li><li><a href="#dg-source">실제 코드</a></li>
     </ol></nav>
 
     <section class="dg-section" id="dg-start" aria-labelledby="dg-start-title">
@@ -53,7 +53,7 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
         <li><strong>서버에서 API 호출</strong><p>접근 토큰을 Bearer 헤더에 넣습니다. 응답을 검사하고 필요한 필드만 자체 서비스에 사용합니다.</p></li>
       </ol>
       <details class="dg-detail"><summary>로컬 실행 · 등록형 클라이언트와 CIMD</summary>
-        <p>로컬에서는 ${link(CENTER, '미지 개발자 센터')}에서 공개 클라이언트를 만들고 <code>http://localhost:3000/auth/callback</code>을 등록하세요. 발급된 <code>mzp_…</code>를 <code>CLIENT_ID</code>에 넣고 <code>openid profile user:profile user:skills</code>를 사용할 수 있도록 설정합니다. 콜백 URL은 포트와 경로까지 일치해야 합니다.</p>
+        <p>로컬에서는 ${link(CENTER, '미지 개발자 센터')}에서 공개 클라이언트를 만들고 <code>http://localhost:3000/auth/callback</code>을 등록하세요. 발급된 <code>mzp_…</code>를 <code>CLIENT_ID</code>에 넣고 클라이언트 등록을 마칩니다. 실제 API 권한은 이후 로그인·추가 연결 화면에서 사용자가 동의합니다. 콜백 URL은 포트와 경로까지 일치해야 합니다.</p>
         ${code('로컬 빠른 시작 · Node.js 20.20 이상 / pnpm 9.4.0', `git clone ${SOURCE}.git\ncd mizi-oidc-example\ncorepack enable\npnpm install --frozen-lockfile\ncp .env.example .env\n# .env의 CLIENT_ID에 발급받은 mzp_… 입력\npnpm dev`)}
         <p>이 라이브 데모는 공개 HTTPS 주소의 ${link(`${model.baseUrl}/client.json`, 'CIMD 문서')}를 client ID로 사용합니다. CIMD는 앱 메타데이터를 제공하는 방식입니다. <code>localhost</code> 문서는 미지 서버에서 가져올 수 없으므로 로컬 예제에는 등록형 클라이언트를 사용합니다.</p>
         <dl class="dg-config"><div><dt>현재 발급자 · issuer</dt><dd><code>${escape(model.issuer)}</code></dd></div><div><dt>현재 데모 client ID</dt><dd><code>${escape(model.clientId)}</code></dd></div><div><dt>현재 데모 콜백 URL</dt><dd><code>${escape(callback)}</code></dd></div></dl>
@@ -68,6 +68,7 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
         <tr><td><code>profile</code></td><td>UserInfo의 닉네임 요청</td><td>OIDC 표준 범위</td></tr>
         <tr><td><code>user:profile</code></td><td>회원·소개·관심 분야 API 읽기</td><td>미지 고유 범위</td></tr>
         <tr><td><code>user:skills</code></td><td>내 스킬 API 읽기</td><td>미지 고유 범위</td></tr>
+        <tr><td><code>user:profile:write</code></td><td>내 소개만 수정 · 명시적 추가 동의</td><td>미지 고유 쓰기 범위</td></tr>
       </tbody></table></div>
       <p class="dg-note"><code>profile</code>과 <code>user:profile</code>은 다릅니다. <code>openid profile</code>로 로그인했다고 회원 API까지 허용된 것은 아닙니다.</p>
       <p>한 번 연결한 뒤에는 <strong>다시 가져오기</strong>로 같은 화면의 정보만 새로 읽습니다. 접근 토큰 갱신이 필요하면 서버에서 처리하며 프로젝트 선택도 유지합니다. 연결이 없거나 권한이 취소된 경우에는 <strong>다시 연결하기</strong>를 직접 선택합니다. 자동으로 미지 로그인 화면을 열지는 않습니다.</p>
@@ -107,12 +108,13 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
     </section>
 
     <section class="dg-section" id="dg-api" aria-labelledby="dg-api-title">
-      <h2 id="dg-api-title">데모가 호출하는 세 가지 API</h2>
+      <h2 id="dg-api-title">데모가 호출하는 API</h2>
       <p>기본 주소는 <code>${escape(apiOrigin)}</code>입니다. HTTPS로 호출하고 JSON 응답을 받습니다. 경로·응답 필드·<code>user:*</code> 권한 이름은 미지의 API 계약이며 OIDC의 공통 사용자 정보 규격은 아닙니다.</p>
       <div class="dg-table-wrap"><table class="dg-table"><thead><tr><th>메서드 · 경로</th><th>필수 범위</th><th>데모에서 쓰는 정보</th></tr></thead><tbody>
         <tr><td><a href="#dg-me"><code>GET /v1/me</code></a></td><td><code>user:profile</code></td><td>회원 ID·닉네임·GitHub 연결 상태</td></tr>
         <tr><td><a href="#dg-profile"><code>GET /v1/me/profile</code></a></td><td><code>user:profile</code></td><td>역할·소개·관심 분야</td></tr>
         <tr><td><a href="#dg-skills"><code>GET /v1/me/skills</code></a></td><td><code>user:skills</code></td><td>스킬 이름·출처·제공된 검증 정보</td></tr>
+        <tr><td><a href="#dg-write"><code>PATCH /v1/me/profile/bio</code></a></td><td><code>user:profile:write</code></td><td>로그인한 회원의 소개만 수정</td></tr>
       </tbody></table></div>
       <p class="dg-note">아래 JSON은 모두 가상 자료로 만든 <strong>설명용 일부 필드 예제</strong>입니다. 전체 응답 스키마나 실제 회원의 조회 결과를 나타내지 않습니다.</p>
       <article class="dg-endpoint" id="dg-me"><h3><code>GET /v1/me</code> · 회원 기본 정보</h3>
@@ -131,6 +133,25 @@ export function renderDeveloperGuide(model: { issuer: string; clientId: string; 
         <p><code>verification_method</code>, <code>verified_by</code>, <code>verified_at</code>는 없을 수 있습니다. 이 API에는 스킬별 회원 ID나 전체 건수, <code>partial</code> 필드가 없습니다. 데모는 검증된 접근 토큰의 회원 세션에 조회 결과를 묶으며 독립적인 스킬 검증을 주장하지 않습니다.</p>
         <p>본인 목록에는 비공개 스킬도 포함될 수 있습니다. 공개 여부와 관계없이 타인에게 노출하지 않도록 자체 서비스의 접근 권한을 유지하세요.</p></details>
       </article>
+    </section>
+
+    <section class="dg-section" id="dg-write" aria-labelledby="dg-write-title">
+      <h2 id="dg-write-title">내 소개 수정 → 저장 → 미지에서 다시 확인</h2>
+      <p><a href="/profile#profile-editor">내 정보의 ‘내 소개 수정’</a>에서 체험합니다. 처음 로그인과 읽기 연결에는 쓰기 권한이 없습니다. <strong>‘내 소개 수정 허용하기’</strong>를 눌렀을 때만 <code>user:profile:write</code>를 추가 요청합니다. 동의 후에도 사용자가 내용을 입력하고 <strong>‘미지에 저장’</strong>을 눌러야 변경됩니다.</p>
+      <ol class="dg-list"><li><code>POST /connect-profile-write</code>로 명시적으로 추가 동의를 요청합니다. 읽기·결과 확인에는 <code>user:profile</code>도 필요합니다.</li>
+        <li>브라우저는 소개만 데모의 <code>POST /profile/bio</code>로 보냅니다. 서버는 Origin·세션·권한·고정 resource를 검사하고 서버 전용 접근 토큰으로 아래 PATCH를 한 번 호출합니다.</li>
+        <li>응답의 <code>user.id</code>를 검증한 OIDC <code>sub</code>와 대조합니다. 이어 <code>GET /v1/me/profile</code>을 호출하여 회원 ID와 소개가 입력값과 모두 일치할 때만 ‘반영 확인’으로 표시합니다.</li></ol>
+      ${code('서버에서 보내는 HTTP 요청 · 가상 예제', `PATCH /v1/me/profile/bio HTTP/1.1\nHost: ${host(model.issuer)}\nAuthorization: Bearer <서버에 보관한 access_token>\nContent-Type: application/json\nAccept: application/json\n\n{"bio":"작은 도구를 만들어요."}`)}
+      ${code('성공 응답 · 가상 JSON', json({ user: { id: 'usr_example' }, bio: '작은 도구를 만들어요.' }))}
+      <p>JSON은 <code>bio</code> 한 항목만 받습니다. 문자열은 최대 300 UTF-16 코드 단위이며 일부 이모지는 2자로 계산됩니다. 앞뒤 공백을 자동 제거하지 않습니다. <code>{"bio":""}</code>는 소개를 지웁니다. 다른 필드·잘못된 타입·길이 초과는 거절합니다. 회원 ID를 입력받지 않으며 닉네임·관심 분야·연락처·공개 설정은 수정할 수 없습니다. 기존 <code>PATCH /v1/me/profile</code> 전체 수정 경로는 위임 토큰으로 사용할 수 없습니다.</p>
+      <p><strong>실제 미지 데이터가 바뀝니다.</strong> 기존 공개 범위에 따라 공개 프로필에도 반영됩니다. 읽기 권한만 있는 토큰은 이 PATCH에서 403을 받습니다. 이 기능은 미지의 API 계약이며 OIDC 자체가 프로필 수정을 정의하는 것은 아닙니다.</p>
+      <details class="dg-detail"><summary>resource · 토큰 · 불확실한 저장 결과 처리</summary>
+        <p>쓰기 연결은 <code>${escape(apiOrigin)}/v1/me/profile/bio</code> resource를 명시합니다. 결과 확인을 위한 <code>/v1/me</code>·<code>/v1/me/profile</code>도 함께 요청하고, 기존 스킬 연결이 있으면 <code>/v1/me/skills</code>를 포함합니다. 코드 교환과 갱신에도 승인된 resource 집합을 유지합니다. 현재 미지 회원 API 서버는 resource audience를 별도로 강제하지 않으므로 scope·회원 인증 검사가 권한 경계입니다. 데모의 고정 resource 검사를 API 서버의 audience 강제와 혼동하지 마세요.</p>
+        <p>저장할 때 유효한 서버 보관 토큰을 재사용하고 필요하면 먼저 갱신합니다. 매번 OAuth 화면을 열지 않습니다. 일반 읽기 재연결이 쓰기 권한을 자동으로 재요청하지는 않습니다.</p>
+        <p>통신 끊김·5xx는 실제 저장 여부가 불확실할 수 있어 PATCH를 자동 재시도하지 않습니다. 저장 응답은 성공했지만 재조회가 실패한 경우도 별도로 안내합니다. 사용자는 ‘프로필 다시 가져오기’로 확인한 뒤 필요할 때 다시 저장합니다. 401/403이나 회원 ID 불일치는 연결을 폐기하고 재연결을 안내합니다.</p>
+        <p>안전하게 분류한 결과와 최대 300자의 입력 초안은 해당 서버 세션에만 보관하며 URL·로그에 넣지 않습니다. 성공 여부는 URL 매개변수로 만들 수 없습니다. 성공한 프로필 재조회는 이전 저장 알림·초안을 지웁니다. 세션·연결이 요청 중 바뀌거나 저장소 장애가 나면 결과 기록을 보장할 수 없으므로 다시 조회하도록 안내합니다. 프로젝트 선택·스킬·로그인 절대 한도는 유지합니다.</p>
+        <p>${link(`${SOURCE}/blob/main/src/profile-write.ts`, '쓰기 요청과 재조회 검증 코드')} · ${link(`${SOURCE}/blob/main/src/app.ts`, '동의·저장 경로')} · ${link(`${SOURCE}/blob/main/src/profile-write-notice.ts`, '서버 저장 결과 스키마')}</p>
+      </details>
     </section>
 
     <section class="dg-section" id="dg-fetch" aria-labelledby="dg-fetch-title">

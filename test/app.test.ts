@@ -272,7 +272,7 @@ describe('optional member API and the demo-owned project board', () => {
     expect(response.status).toBe(303);
     expect(f.provider.authorizationUrl.mock.calls[1]![0].readMemberApi).toBe(true);
     expect(response.headers.get('referrer-policy')).toBe('no-referrer');
-    expect((await (await f.app.request(`${base}/client.json`)).json()).scope).toBe('openid profile user:profile user:skills');
+    expect((await (await f.app.request(`${base}/client.json`)).json()).scope).toBe('openid profile user:profile user:skills user:profile:write');
   });
 
   it('protects each private page and preserves same-origin forms on every authenticated page', async () => {

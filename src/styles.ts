@@ -1,4 +1,9 @@
 export const styles = `
+.profile-editor { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); scroll-margin-top: 24px; }
+.bio-form { margin-top: 20px; }
+.bio-form label { display: block; font-size: 14px; font-weight: 650; }
+.bio-form textarea { display: block; width: 100%; min-height: 150px; margin-top: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; resize: vertical; color: var(--ink); background: var(--card); font-size: 16px; line-height: 1.6; }
+.bio-form .button { margin-top: 18px; }
 :root {
   color-scheme: light;
   --paper: #f6f5f1;
@@ -17,7 +22,7 @@ export const styles = `
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--paper); color: var(--ink); line-height: 1.65; }
 a { color: inherit; text-underline-offset: .24em; }
-button, input { font: inherit; }
+button, input, textarea { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
 button { cursor: pointer; }
 :focus-visible { outline: 3px solid #57886a; outline-offset: 5px; }
